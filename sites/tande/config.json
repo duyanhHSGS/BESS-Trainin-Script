@@ -1,0 +1,42 @@
+{
+  "siteId": "tande",
+  "bess": {
+    "eCapKwh": 1250,
+    "pRatedKw": 450,
+    "etaCh": 0.9,
+    "etaDis": 0.9,
+    "socMin": 0.2,
+    "socMax": 0.9,
+    "socSafetyBuffer": 0.05,
+    "socMinEmergency": 0.05,
+    "enableExport": false,
+    "fitPrice": 0,
+    "enableEveningCharge": false
+  },
+  "tariff": {
+    "billingMode": "2tc",
+    "pricePeak": 2251,
+    "priceMid": 1332,
+    "priceOff": 904,
+    "tCap": 285000,
+    "peakWindows": "17:30-22:30",
+    "offWindows": "00:00-06:00",
+    "sundayNoPeak": true,
+    "timezone": "Asia/Ho_Chi_Minh"
+  },
+  "economics": {
+    "degradationCostPerKwhDischarged": 500
+  },
+  "meta": {
+    "resolvedAt": "2026-09-25T00:00:00Z",
+    "effectiveDate": "2026-08-31",
+    "configHash": "manual-tande-cross-site-reference",
+    "sourceRefs": {
+      "bessSiteConfigId": "manual-tande",
+      "tariffPlanId": "manual-shared-reference",
+      "touConfigId": "manual-shared-reference",
+      "energyPriceId": "manual-shared-reference",
+      "pmaxContractId": "manual-shared-reference"
+    }
+  }
+}

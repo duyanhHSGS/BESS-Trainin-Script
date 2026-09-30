@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+uv.lock
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+*.tar
+
+# Test artifacts
+tests/golden/*.json.tmp
+
+# Logs
+*.log
+
+# DRL policy checkpoints & export bundles (do not commit)
+**/policy_*.pt
+*.drl.zip
+
+# bess-drl runtime data (policies, cached datasets, train configs, state)
+bess-drl/var/
+
+# Local training script output checkpoints
+bess-drl/src/bess_drl/training/drl_engine/results/

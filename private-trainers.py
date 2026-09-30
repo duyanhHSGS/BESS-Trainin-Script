@@ -23,8 +23,14 @@ MIN_MONTH_COVERAGE = 0.80
 VAL_MONTHS = 2
 TEST_MONTHS = 1
 STEPS_PER_DAY = 96
-TRAINALL_MAX_WORKERS = 4
-# TODO(PARALLEL-TRAIN): benchmark this cap per training host and make the
+CPU_THREAD_ENV_VARS: tuple[str, ...] = (
+    "DRL_TORCH_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+# TODO(PARALLEL-TRAIN): benchmark the CPU split per training host and make the
 # launcher GPU-aware once PPO has an explicit device/batching contract.
 
 # Keep the experiment receipt explicit. Do not silently inherit trainer defaults:
@@ -319,9 +325,33 @@ def _prepare_output(spec: SiteSpec) -> None:
     output.mkdir(parents=True, exist_ok=True)
 
 
-def run_site(spec: SiteSpec, *, dry_run: bool = False) -> None:
+def allocate_cpu_threads(
+    training_count: int,
+    cpu_count: int | None = None,
+) -> tuple[int, ...]:
+    """Split logical CPUs across simultaneous site trainers."""
+    if training_count < 1:
+        raise ValueError("training_count must be >= 1")
+    detected_cpus = cpu_count if cpu_count is not None else os.cpu_count()
+    logical_cpus = max(1, detected_cpus or 1)
+    base, remainder = divmod(logical_cpus, training_count)
+    if base == 0:
+        return (1,) * training_count
+    return tuple(
+        base + int(index < remainder) for index in range(training_count)
+    )
+
+
+def run_site(
+    spec: SiteSpec,
+    *,
+    dry_run: bool = False,
+    cpu_threads: int | None = None,
+) -> None:
     if not spec.enabled:
         raise PreflightError(f"{spec.display_name} disabled: {spec.disabled_reason}")
+    if cpu_threads is not None and cpu_threads < 1:
+        raise ValueError("cpu_threads must be >= 1")
     audit, train, validation, test, raw = preflight(spec)
     _print_preflight(spec, audit, train, validation, test, raw)
     command = build_command(spec)
@@ -333,6 +363,10 @@ def run_site(spec: SiteSpec, *, dry_run: bool = False) -> None:
     _prepare_output(spec)
     env = os.environ.copy()
     env["DRL_RESULTS_DIR"] = str(spec.output_dir)
+    if cpu_threads is not None:
+        thread_count = str(cpu_threads)
+        for variable in CPU_THREAD_ENV_VARS:
+            env[variable] = thread_count
     subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
 
 
@@ -362,17 +396,24 @@ def run_all(*, dry_run: bool = False) -> None:
     if not enabled_specs:
         return
 
-    workers = min(TRAINALL_MAX_WORKERS, len(enabled_specs))
+    workers = len(enabled_specs)
+    cpu_budgets = allocate_cpu_threads(workers)
     print(
         f"[trainall] starting {len(enabled_specs)} enabled sites with "
-        f"{workers} parallel workers",
+        f"{workers} parallel workers across {sum(cpu_budgets)} logical CPU threads "
+        f"(per-site budgets: {', '.join(map(str, cpu_budgets))})",
         flush=True,
     )
     failures: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_spec = {
-            executor.submit(run_site, spec, dry_run=False): spec
-            for spec in enabled_specs
+            executor.submit(
+                run_site,
+                spec,
+                dry_run=False,
+                cpu_threads=cpu_threads,
+            ): spec
+            for spec, cpu_threads in zip(enabled_specs, cpu_budgets, strict=True)
         }
         for future in concurrent.futures.as_completed(future_to_spec):
             spec = future_to_spec[future]

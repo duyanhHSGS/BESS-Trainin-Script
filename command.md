@@ -50,7 +50,10 @@ The launcher refuses to overwrite a non-empty run directory.
 
 ## One-button training
 
-Run every currently enabled official site with up to four sites training in parallel. Each site keeps its own sequential seed-selection loop and isolated result directory:
+Run every currently enabled site at the same time. The launcher divides all available
+logical CPUs across the site trainer subprocesses, including PyTorch and common numeric
+libraries. Each site keeps its own sequential seed-selection loop and isolated result
+directory:
 
 ```bash
 cd /home/admin/Desktop/CodeProjects/bess-infra
@@ -92,8 +95,11 @@ trainer defaults:
 - lambda energy: `0.97`
 - lambda peak: `0.97`
 
-The launcher also sets `DRL_RESULTS_DIR` to the selected site's run directory and
-adds the site slug to the trainer tag.
+The launcher sets `DRL_RESULTS_DIR` to the selected site's run directory and adds the
+site slug to the trainer tag. For `trainall`, it also assigns each simultaneous trainer
+a share of the machine's logical CPUs through `DRL_TORCH_THREADS`, `OMP_NUM_THREADS`,
+`MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. If there are fewer
+CPUs than enabled sites, every site still starts immediately with a one-thread budget.
 
 ## Preflight contract
 

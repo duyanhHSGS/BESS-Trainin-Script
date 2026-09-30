@@ -122,7 +122,21 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         )
         self.assertNotIn("namduoc", called_slugs)
 
-    def test_trainall_uses_bounded_parallel_workers_for_real_training(self) -> None:
+    def test_allocate_cpu_threads_uses_every_cpu(self) -> None:
+        self.assertEqual(TRAINERS.allocate_cpu_threads(6, 14), (3, 3, 2, 2, 2, 2))
+
+    def test_allocate_cpu_threads_runs_all_trainers_when_cpus_are_fewer(self) -> None:
+        self.assertEqual(TRAINERS.allocate_cpu_threads(6, 2), (1, 1, 1, 1, 1, 1))
+
+    def test_allocate_cpu_threads_rejects_empty_batch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "training_count"):
+            TRAINERS.allocate_cpu_threads(0, 8)
+
+    def test_allocate_cpu_threads_handles_unknown_cpu_count(self) -> None:
+        with mock.patch.object(TRAINERS.os, "cpu_count", return_value=None):
+            self.assertEqual(TRAINERS.allocate_cpu_threads(2), (1, 1))
+
+    def test_trainall_runs_every_enabled_site_in_parallel(self) -> None:
         recorded_workers: list[int] = []
 
         class ImmediateExecutor:
@@ -147,16 +161,73 @@ class PrivateTrainerManifestTests(unittest.TestCase):
             TRAINERS.concurrent.futures,
             "ThreadPoolExecutor",
             ImmediateExecutor,
+        ), mock.patch.object(
+            TRAINERS,
+            "allocate_cpu_threads",
+            return_value=(3, 3, 2, 2, 2, 2),
         ), mock.patch.object(TRAINERS, "run_site") as run_site:
             TRAINERS.run_all(dry_run=False)
 
-        self.assertEqual(recorded_workers, [TRAINERS.TRAINALL_MAX_WORKERS])
+        self.assertEqual(recorded_workers, [6])
         called_slugs = sorted(call.args[0].slug for call in run_site.call_args_list)
         self.assertEqual(
             called_slugs,
-            sorted(["amy", "newing", "youngone", "songwol", "minhdanh", "tande"]),
+            sorted(
+                ["amy", "newing", "youngone", "songwol", "minhdanh", "tande"]
+            ),
         )
-        self.assertTrue(all(call.kwargs == {"dry_run": False} for call in run_site.call_args_list))
+        self.assertEqual(
+            sorted(call.kwargs["cpu_threads"] for call in run_site.call_args_list),
+            [2, 2, 2, 2, 3, 3],
+        )
+        self.assertTrue(
+            all(call.kwargs["dry_run"] is False for call in run_site.call_args_list)
+        )
+
+    def test_run_site_applies_cpu_budget_to_numeric_libraries(self) -> None:
+        spec = TRAINERS.SITES["tande"]
+        with (
+            mock.patch.object(TRAINERS, "preflight") as preflight,
+            mock.patch.object(TRAINERS, "_print_preflight"),
+            mock.patch.object(
+                TRAINERS, "build_command", return_value=["trainer"]
+            ),
+            mock.patch.object(TRAINERS, "_prepare_output"),
+            mock.patch.object(TRAINERS.subprocess, "run") as run,
+        ):
+            preflight.return_value = (
+                mock.sentinel.audit,
+                ("train",),
+                ("validation",),
+                ("test",),
+                {},
+            )
+            TRAINERS.run_site(spec, cpu_threads=3)
+
+        env = run.call_args.kwargs["env"]
+        for variable in TRAINERS.CPU_THREAD_ENV_VARS:
+            with self.subTest(variable=variable):
+                self.assertEqual(env[variable], "3")
+
+    def test_run_site_rejects_invalid_cpu_budget(self) -> None:
+        spec = TRAINERS.SITES["tande"]
+        with (
+            mock.patch.object(TRAINERS, "preflight") as preflight,
+            mock.patch.object(TRAINERS, "_print_preflight"),
+            mock.patch.object(
+                TRAINERS, "build_command", return_value=["trainer"]
+            ),
+            mock.patch.object(TRAINERS, "_prepare_output"),
+        ):
+            preflight.return_value = (
+                mock.sentinel.audit,
+                ("train",),
+                ("validation",),
+                ("test",),
+                {},
+            )
+            with self.assertRaisesRegex(ValueError, "cpu_threads"):
+                TRAINERS.run_site(spec, cpu_threads=0)
 
     def test_trainall_parallel_mode_aggregates_site_failures(self) -> None:
         class ImmediateExecutor:
@@ -177,7 +248,12 @@ class PrivateTrainerManifestTests(unittest.TestCase):
                     future.set_exception(exc)
                 return future
 
-        def fake_run_site(spec, *, dry_run: bool = False) -> None:
+        def fake_run_site(
+            spec,
+            *,
+            dry_run: bool = False,
+            cpu_threads: int | None = None,
+        ) -> None:
             if spec.slug in {"newing", "songwol"}:
                 raise TRAINERS.PreflightError(f"boom-{spec.slug}")
 

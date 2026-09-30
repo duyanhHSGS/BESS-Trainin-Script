@@ -44,7 +44,7 @@ private-data-and-results/
 Training outputs are created at runtime under:
 
 ```text
-private-data-and-results/sites/<site>/results/ppo-iq2-coherent-bc-memory/
+private-data-and-results/sites/<site>/results/iq4_privileged_critic_v1/
 ```
 
 The launcher refuses to overwrite a non-empty run directory.
@@ -87,12 +87,12 @@ Tande is included in `trainall` and can also be selected directly.
 
 **TODO(IQ2-TANDE-GUARD):** before launching Tande in a future batch, confirm the experiment is not merely reproducing the rejected `ppo-iq2-coherent-bc-memory-tande` recipe and record the changed hypothesis in `sites/tande/report.md`.
 
-## Hardcoded IQ2 experiment receipt
+## Hardcoded IQ4 experiment receipt
 
 `private-trainers.py` explicitly passes these values instead of inheriting mutable
 trainer defaults:
 
-- run: `ppo-iq2-coherent-bc-memory`
+- run: `iq4_privileged_critic_v1`
 - steps: `1,500,000`
 - seeds: `0,1,2`
 - rollout: `2880`
@@ -118,10 +118,11 @@ same quota instead of letting every seed spawn workers for the entire machine.
 
 The launcher discovers NVIDIA GPU IDs with `nvidia-smi` and rotates visible devices
 across seed jobs. Override discovery with `PRIVATE_TRAINER_GPUS=0,1` or force CPU-only
-visibility with `PRIVATE_TRAINER_GPUS=cpu`. The current core PPO implementation keeps its
-models and rollout buffers on CPU, so GPU assignment is forward-compatible scheduling,
-not fake acceleration; real CUDA compute still requires a device contract in the core
-trainer. This private launcher deliberately does not modify root-repository code.
+visibility with `PRIVATE_TRAINER_GPUS=cpu`. PPO rollout collection and tiny inference
+steps remain on CPU, while optimizer-heavy behaviour cloning and PPO updates use the
+core trainer's `DRL_TRAIN_DEVICE=auto` contract and select CUDA when available. The
+launcher therefore assigns real GPU visibility to seed jobs without changing PPO math.
+This private launcher deliberately does not modify root-repository code.
 
 ## Preflight contract
 

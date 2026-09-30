@@ -18,7 +18,9 @@ from typing import Any
 PRIVATE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PRIVATE_ROOT.parent
 TRAINER = REPO_ROOT / "bess-drl/src/bess_drl/training/drl_engine/run_train_dataset.py"
-RUN_NAME = "ppo-iq2-coherent-bc-memory"
+RUN_NAME = "iq4_privileged_critic_v1"
+# TODO(IQ4-EXPERIMENT-RECEIPT): keep this private run identity pinned to the
+# asymmetric privileged-critic experiment until the full six-site comparison is reported.
 MIN_MONTH_COVERAGE = 0.80
 VAL_MONTHS = 2
 TEST_MONTHS = 1

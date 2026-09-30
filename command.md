@@ -83,6 +83,10 @@ Train one site:
 
 Tande is included in `trainall` and can also be selected directly.
 
+**Tande IQ2 regression guard (2026-09-30):** the run `ppo-iq2-coherent-bc-memory-tande` on checkout `0f6b6c3` was intentionally aborted after seed 0 completed, seed 1 reached 641,376 steps, and seed 2 had not started. Seed 1's best-validation checkpoint reached 13.9119% validation saving and 13.0452% diagnostic test saving, both below the existing Tande BASE (15.5378% validation / 14.23% test) and IQ1 (15.3005% / 14.00%) references. **Do not rerun that exact Tande IQ2 recipe unchanged.** Any future Tande IQ2-derived experiment needs a materially different written hypothesis and a new run name; preserve the failed artifacts as evidence.
+
+**TODO(IQ2-TANDE-GUARD):** before launching Tande in a future batch, confirm the experiment is not merely reproducing the rejected `ppo-iq2-coherent-bc-memory-tande` recipe and record the changed hypothesis in `sites/tande/report.md`.
+
 ## Hardcoded IQ2 experiment receipt
 
 `private-trainers.py` explicitly passes these values instead of inheriting mutable

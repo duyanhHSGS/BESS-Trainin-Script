@@ -38,6 +38,9 @@ Important: unlike the Youngone benchmark, Tande has a complete August billing mo
 |---|---|---|---|---:|---:|---:|---:|---|
 | BASE | `fixed_dataset_v1_tande` | `cbdf7d0` | Production feed-forward PPO baseline | **15.5378%** | **14.23%** | 204.43 kW | 1 | **Money-saving reference** |
 | IQ1 | `ppo-iq1-gru-memory-uncle-tande` | `87e6e93` | Separate 128-wide actor/critic GRUs with 96-step TBPTT and billing-month memory reset | 15.3005% | 14.00% | **216.83 kW** | 1 | Stronger peak shave; weaker savings |
+| IQ2 | `ppo-iq2-coherent-bc-memory-tande` | `0f6b6c3` | Coherent BC + recurrent PPO recipe used by the multi-site IQ2 batch | **13.9119%*** | **13.0452%*** | **183.51 kW*** | 1* | **ABORTED REGRESSION — do not rerun unchanged** |
+
+**IQ2 completion note:** This is not a completed canonical experiment: seed 0 finished, seed 1 was aborted after 641,376 steps, and seed 2 never started. Values shown are diagnostic results from seed 1's best validation checkpoint at step 481,056, not a completed three-seed selection.
 
 ---
 
@@ -390,6 +393,96 @@ BASE remains the Tande money-saving reference. IQ1 is currently the stronger pea
 
 ---
 
+## IQ2 — ppo-iq2-coherent-bc-memory-tande — ABORTED REGRESSION
+
+### Permanent warning for future experiments
+
+**Do not rerun this exact IQ2 recipe on Tande unchanged.** The experiment was intentionally aborted on 2026-09-30 because the available validation and held-out test evidence was worse than both existing Tande references. Repeating the same code, hyperparameters, split, and objective would spend compute reproducing an already-observed regression rather than testing a new hypothesis.
+
+A future Tande experiment may reuse the IQ2 machinery only when it has a materially different, written hypothesis that addresses the observed failure. The new run must use a new run name and document what changed. Do not overwrite or silently promote these partial IQ2 artifacts.
+
+### Identity and completion status
+
+- Run: `ppo-iq2-coherent-bc-memory-tande`
+- Machine checkout: `dev-2-testing` at `0f6b6c3`
+- Intended seeds: `0,1,2`
+- Lambda peak: `0.97`
+- Intended budget: `1,500,000` steps per seed
+- Seed 0: completed `1,500,000` steps
+- Seed 1: aborted after the last logged evaluation at `641,376` steps
+- Seed 2: never started
+- Canonical three-seed selection: **not completed**
+- Canonical IQ2 evaluation artifact: **not produced**
+- Result status: **ABORTED / REGRESSION / diagnostic only**
+
+### Best validation checkpoints preserved before abort
+
+| Metric | Seed 0 | Seed 1 |
+|---|---:|---:|
+| Best checkpoint step | 1,229,856 | **481,056** |
+| Validation cost | 709,562,911.29 VND | **693,891,046.31 VND** |
+| Validation saving | 11.9675% | **13.9119%** |
+| Validation Oracle gap | 20.2758% | **17.6193%** |
+| Validation opportunity captured | 44.64% | **51.89%** |
+| Validation peak | **787.81 kW** | 809.18 kW |
+
+Seed 1 briefly improved to 13.9119% validation saving at step 481,056, then degraded: 13.0% at 534,240, 9.2% at 588,096, and 7.9% at 641,376. This is another example of why the best-validation checkpoint must be preserved and why the final learner state must never be assumed to be the best policy.
+
+### Diagnostic held-out test — best available seed 1 checkpoint
+
+The saved seed 1 checkpoint selected by its own validation minimum was evaluated deterministically on the untouched August 2026 test month after abort. This is useful failure evidence, but it is **not** a canonical IQ2 result because the required three-seed selection protocol never completed.
+
+- Test range: `2026-08-01` -> `2026-08-31`
+- Coverage: **100.0%**
+- No-BESS cost: **367,288,396.84 VND**
+- IQ2 diagnostic cost: **319,374,745.87 VND**
+- Oracle cost: **272,763,419.07 VND**
+- Test saving: **13.0452%**
+- Oracle gap: **17.0886%**
+- Oracle opportunity captured: **50.69%**
+- No-BESS peak: **856.73 kW**
+- IQ2 peak: **673.22 kW**
+- Peak cut: **183.51 kW**
+- Oracle peak: **529.05 kW**
+- Energy cost: **121,338,007.71 VND**
+- Demand cost: **191,868,060.50 VND**
+- Degradation cost: **6,733,077.20 VND**
+- Terminal settlement: **-564,399.54 VND**
+- Physical clip rate: **36.83%**
+- Requested/executed mismatch: **11,780.70 kWh**
+- Peak-window grid charging: **10.30 kWh**
+- Sign flips: **369**
+- Terminal SOC: **80.50%**
+- Equivalent full cycles: **10.773** for the August billing month
+
+Seed 0's best-validation checkpoint generalized much worse on the same test month: **6.4539% saving**, **25.9641% Oracle gap**, **750.25 kW peak**, **106.48 kW peak cut**, and **25.08% opportunity captured**. The large seed spread is additional evidence against treating this recipe as a stable Tande improvement.
+
+### Regression versus existing Tande references
+
+| Metric | BASE | IQ1 GRU | IQ2 best available* |
+|---|---:|---:|---:|
+| Validation saving | **15.5378%** | 15.3005% | 13.9119% |
+| Test saving | **14.23%** | 14.00% | 13.0452% |
+| Test cost | **315.009M VND** | 315.851M VND | 319.375M VND |
+| Test peak | 652.30 kW | **639.90 kW** | 673.22 kW |
+| Peak cut | 204.43 kW | **216.83 kW** | 183.51 kW |
+| Oracle gap | **15.49%** | 15.80% | 17.09% |
+| Opportunity captured | **55.31%** | 54.42% | 50.69% |
+| Physical clip rate | 39.11% | 50.60% | **36.83%** |
+| Peak-window grid charging | 921.24 kWh | 2,799.61 kWh | **10.30 kWh** |
+
+\* Diagnostic seed 1 checkpoint only; not canonical three-seed IQ2 selection.
+
+Compared with BASE, the best available IQ2 checkpoint loses about **1.63 percentage points of validation saving**, **1.18 percentage points of test saving**, costs about **4.37M VND more**, and cuts the monthly peak by **20.92 kW less**. Compared with IQ1, it loses about **1.39 pp validation saving**, **0.95 pp test saving**, costs about **3.52M VND more**, and cuts the peak by **33.32 kW less**.
+
+The one useful signal is that IQ2 reduced physical clipping and almost eliminated peak-window grid charging. That cleaner physical behaviour did **not** translate into better economics. Future work should investigate why the new policy became more physically polite while giving away demand-charge and total-cost performance; do not simply rerun the same recipe for more steps.
+
+### Decision
+
+**Reject this exact IQ2 recipe for Tande. Preserve it as a failed experiment. Do not promote it, do not overwrite BASE/IQ1, and do not rerun it unchanged.** A future Tande IQ must begin from a new hypothesis and explicitly compare against both BASE and IQ1 before consuming a full three-seed budget.
+
+---
+
 ## Future IQ Entry Template
 
 ### IQX — run-name
@@ -438,6 +531,7 @@ Artifacts:
 - TODO: compare every experiment against Tande BASE and the current best references.
 - TODO: never call an IQ better only because validation improved; always check untouched test economics.
 - TODO: preserve failed experiments too. Bad results are evidence, not trash.
+- TODO(IQ2-TANDE-GUARD): never rerun `ppo-iq2-coherent-bc-memory-tande` unchanged; require a materially different written hypothesis, new run name, and explicit BASE/IQ1 comparison before spending another full Tande seed budget.
 - TODO: investigate the high BASE 39.11% and IQ1 50.60% physical clip rates as policy-learning inefficiency without immediately adding hard-coded rules.
 - TODO: investigate why IQ1 increases peak-window grid charging from 921.24 kWh to 2,799.61 kWh.
 - TODO: keep Tande and Youngone reports separate because their site distributions and test-month coverage differ.

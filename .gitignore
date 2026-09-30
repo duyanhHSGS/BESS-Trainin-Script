@@ -55,3 +55,6 @@ bess-drl/var/
 
 # Local training script output checkpoints
 bess-drl/src/bess_drl/training/drl_engine/results/
+
+# Private site training runs (checkpoints, curves, evaluations)
+sites/*/results/

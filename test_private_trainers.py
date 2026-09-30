@@ -3,15 +3,18 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("private-trainers.py")
+SITE_CUSTOMIZE_PATH = Path(__file__).with_name("sitecustomize.py")
 SPEC = importlib.util.spec_from_file_location("private_trainers_under_test", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load {MODULE_PATH}")
@@ -91,17 +94,18 @@ class PrivateTrainerManifestTests(unittest.TestCase):
 
     def test_build_command_hardcodes_iq2_experiment_receipt(self) -> None:
         spec = TRAINERS.SITES["newing"]
-        command = TRAINERS.build_command(spec)
+        job = TRAINERS.SeedJob(spec=spec, seed=1, cpu_threads=4, gpu_id="0")
+        command = TRAINERS.build_command(job)
         self.assertEqual(command[0], sys.executable)
         self.assertIn(str(TRAINERS.TRAINER), command)
         self.assertIn(str(spec.csv_path), command)
         self.assertIn(str(spec.config_path), command)
         self.assertIn("1500000", command)
-        self.assertIn("0,1,2", command)
+        self.assertEqual(command[command.index("--seeds") + 1], "1")
         self.assertIn("2880", command)
         self.assertIn("3e-5", command)
         self.assertIn("3e-4", command)
-        self.assertIn("ppo-iq2-coherent-bc-memory-newing", command)
+        self.assertIn("ppo-iq2-coherent-bc-memory-newing-seed1", command)
 
     def test_output_directory_is_scoped_by_site_and_run(self) -> None:
         youngone = TRAINERS.SITES["youngone"].output_dir
@@ -136,6 +140,113 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         with mock.patch.object(TRAINERS.os, "cpu_count", return_value=None):
             self.assertEqual(TRAINERS.allocate_cpu_threads(2), (1, 1))
 
+    def test_seed_jobs_run_every_seed_and_consume_the_cpu_budget(self) -> None:
+        jobs = TRAINERS._seed_jobs(
+            TRAINERS.SITES["tande"],
+            cpu_threads=20,
+            gpu_ids=("0", "1"),
+            gpu_offset=0,
+        )
+        self.assertEqual([job.seed for job in jobs], [0, 1, 2])
+        self.assertEqual([job.cpu_threads for job in jobs], [7, 7, 6])
+        self.assertEqual([job.gpu_id for job in jobs], ["0", "1", "0"])
+
+    def test_seed_jobs_rotate_gpu_offset_between_sites(self) -> None:
+        jobs = TRAINERS._seed_jobs(
+            TRAINERS.SITES["tande"],
+            cpu_threads=3,
+            gpu_ids=("0", "1", "2", "3"),
+            gpu_offset=3,
+        )
+        self.assertEqual([job.gpu_id for job in jobs], ["3", "0", "1"])
+
+    def test_gpu_override_supports_explicit_cpu_mode(self) -> None:
+        self.assertEqual(
+            TRAINERS.detect_gpu_ids({TRAINERS.GPU_OVERRIDE_ENV: "cpu"}),
+            (),
+        )
+
+    def test_gpu_override_parses_unique_ids(self) -> None:
+        self.assertEqual(
+            TRAINERS.detect_gpu_ids({TRAINERS.GPU_OVERRIDE_ENV: "0, 2"}),
+            ("0", "2"),
+        )
+
+    def test_gpu_override_rejects_duplicate_ids(self) -> None:
+        with self.assertRaisesRegex(TRAINERS.PreflightError, "duplicate"):
+            TRAINERS.detect_gpu_ids({TRAINERS.GPU_OVERRIDE_ENV: "0,0"})
+
+    def test_gpu_discovery_reads_nvidia_smi_indices(self) -> None:
+        completed = SimpleNamespace(stdout="0\n2\n")
+        with mock.patch.object(
+            TRAINERS.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual(TRAINERS.detect_gpu_ids({}), ("0", "2"))
+        self.assertIn("--query-gpu=index", run.call_args.args[0])
+
+    def test_gpu_discovery_falls_back_to_cpu_without_nvidia_smi(self) -> None:
+        with mock.patch.object(
+            TRAINERS.subprocess, "run", side_effect=FileNotFoundError
+        ):
+            self.assertEqual(TRAINERS.detect_gpu_ids({}), ())
+
+    def test_seed_environment_caps_numeric_threads_and_gpu_visibility(self) -> None:
+        job = TRAINERS.SeedJob(
+            spec=TRAINERS.SITES["tande"],
+            seed=1,
+            cpu_threads=3,
+            gpu_id="2",
+        )
+        env = TRAINERS._seed_environment(job)
+        for variable in TRAINERS.CPU_THREAD_ENV_VARS:
+            with self.subTest(variable=variable):
+                self.assertEqual(env[variable], "3")
+        self.assertEqual(env[TRAINERS.CPU_COUNT_ENV], "3")
+        self.assertEqual(
+            env["PYTHONPATH"].split(TRAINERS.os.pathsep)[0],
+            str(TRAINERS.PRIVATE_ROOT),
+        )
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "2")
+        self.assertEqual(env["NVIDIA_VISIBLE_DEVICES"], "2")
+
+    def test_sitecustomize_applies_cpu_quota_before_trainer_imports(self) -> None:
+        original_cpu_count = TRAINERS.os.cpu_count
+        original_process_cpu_count = getattr(TRAINERS.os, "process_cpu_count", None)
+        custom_spec = importlib.util.spec_from_file_location(
+            "private_sitecustomize_under_test",
+            SITE_CUSTOMIZE_PATH,
+        )
+        if custom_spec is None or custom_spec.loader is None:
+            self.fail("could not load private sitecustomize module")
+            return
+        custom_module = importlib.util.module_from_spec(custom_spec)
+        try:
+            with mock.patch.dict(
+                TRAINERS.os.environ,
+                {TRAINERS.CPU_COUNT_ENV: "5"},
+            ):
+                custom_spec.loader.exec_module(custom_module)
+                self.assertEqual(TRAINERS.os.cpu_count(), 5)
+        finally:
+            setattr(TRAINERS.os, "cpu_count", original_cpu_count)
+            if original_process_cpu_count is not None:
+                setattr(
+                    TRAINERS.os,
+                    "process_cpu_count",
+                    original_process_cpu_count,
+                )
+
+    def test_cpu_seed_environment_hides_parent_gpu(self) -> None:
+        job = TRAINERS.SeedJob(
+            spec=TRAINERS.SITES["tande"],
+            seed=0,
+            cpu_threads=1,
+        )
+        with mock.patch.dict(TRAINERS.os.environ, {"CUDA_VISIBLE_DEVICES": "9"}):
+            env = TRAINERS._seed_environment(job)
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "")
+        self.assertEqual(env["NVIDIA_VISIBLE_DEVICES"], "void")
+
     def test_trainall_runs_every_enabled_site_in_parallel(self) -> None:
         recorded_workers: list[int] = []
 
@@ -165,6 +276,8 @@ class PrivateTrainerManifestTests(unittest.TestCase):
             TRAINERS,
             "allocate_cpu_threads",
             return_value=(3, 3, 2, 2, 2, 2),
+        ), mock.patch.object(
+            TRAINERS, "detect_gpu_ids", return_value=("0", "1")
         ), mock.patch.object(TRAINERS, "run_site") as run_site:
             TRAINERS.run_all(dry_run=False)
 
@@ -183,17 +296,47 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         self.assertTrue(
             all(call.kwargs["dry_run"] is False for call in run_site.call_args_list)
         )
+        self.assertTrue(
+            all(call.kwargs["gpu_ids"] == ("0", "1") for call in run_site.call_args_list)
+        )
+        self.assertEqual(
+            sorted(call.kwargs["gpu_offset"] for call in run_site.call_args_list),
+            [0, 3, 6, 9, 12, 15],
+        )
 
-    def test_run_site_applies_cpu_budget_to_numeric_libraries(self) -> None:
+    def test_run_site_runs_all_seeds_in_parallel_then_aggregates(self) -> None:
         spec = TRAINERS.SITES["tande"]
+        recorded_workers: list[int] = []
+
+        class ImmediateExecutor:
+            def __init__(self, max_workers: int) -> None:
+                recorded_workers.append(max_workers)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+            def submit(self, fn, *args, **kwargs):
+                future = TRAINERS.concurrent.futures.Future()
+                try:
+                    future.set_result(fn(*args, **kwargs))
+                except BaseException as exc:
+                    future.set_exception(exc)
+                return future
+
         with (
             mock.patch.object(TRAINERS, "preflight") as preflight,
             mock.patch.object(TRAINERS, "_print_preflight"),
-            mock.patch.object(
-                TRAINERS, "build_command", return_value=["trainer"]
-            ),
             mock.patch.object(TRAINERS, "_prepare_output"),
-            mock.patch.object(TRAINERS.subprocess, "run") as run,
+            mock.patch.object(TRAINERS, "_run_seed_job") as run_seed,
+            mock.patch.object(TRAINERS, "_aggregate_seed_outputs") as aggregate,
+            mock.patch.object(
+                TRAINERS.concurrent.futures,
+                "ThreadPoolExecutor",
+                ImmediateExecutor,
+            ),
         ):
             preflight.return_value = (
                 mock.sentinel.audit,
@@ -202,22 +345,34 @@ class PrivateTrainerManifestTests(unittest.TestCase):
                 ("test",),
                 {},
             )
-            TRAINERS.run_site(spec, cpu_threads=3)
+            TRAINERS.run_site(spec, cpu_threads=8, gpu_ids=("0", "1"))
 
-        env = run.call_args.kwargs["env"]
-        for variable in TRAINERS.CPU_THREAD_ENV_VARS:
-            with self.subTest(variable=variable):
-                self.assertEqual(env[variable], "3")
+        self.assertEqual(recorded_workers, [3])
+        jobs = [call.args[0] for call in run_seed.call_args_list]
+        self.assertEqual([job.seed for job in jobs], [0, 1, 2])
+        self.assertEqual([job.cpu_threads for job in jobs], [3, 3, 2])
+        self.assertEqual([job.gpu_id for job in jobs], ["0", "1", "0"])
+        aggregate.assert_called_once()
+        self.assertEqual(list(aggregate.call_args.args[1]), jobs)
 
     def test_run_site_rejects_invalid_cpu_budget(self) -> None:
         spec = TRAINERS.SITES["tande"]
+        with self.assertRaisesRegex(ValueError, "cpu_threads"):
+            TRAINERS.run_site(spec, cpu_threads=0)
+
+    def test_run_site_reports_failed_seed_without_aggregating(self) -> None:
+        spec = TRAINERS.SITES["tande"]
+
+        def fail_seed(job) -> None:
+            if job.seed == 1:
+                raise subprocess.CalledProcessError(7, ["trainer"])
+
         with (
             mock.patch.object(TRAINERS, "preflight") as preflight,
             mock.patch.object(TRAINERS, "_print_preflight"),
-            mock.patch.object(
-                TRAINERS, "build_command", return_value=["trainer"]
-            ),
             mock.patch.object(TRAINERS, "_prepare_output"),
+            mock.patch.object(TRAINERS, "_run_seed_job", side_effect=fail_seed),
+            mock.patch.object(TRAINERS, "_aggregate_seed_outputs") as aggregate,
         ):
             preflight.return_value = (
                 mock.sentinel.audit,
@@ -226,8 +381,61 @@ class PrivateTrainerManifestTests(unittest.TestCase):
                 ("test",),
                 {},
             )
-            with self.assertRaisesRegex(ValueError, "cpu_threads"):
-                TRAINERS.run_site(spec, cpu_threads=0)
+            with self.assertRaisesRegex(TRAINERS.PreflightError, "seed 1"):
+                TRAINERS.run_site(spec, cpu_threads=3)
+        aggregate.assert_not_called()
+
+    def test_aggregate_selects_lowest_validation_cost(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            TRAINERS, "PRIVATE_ROOT", Path(tmp)
+        ):
+            spec = deepcopy(TRAINERS.SITES["tande"])
+            spec.output_dir.mkdir(parents=True)
+            jobs = TRAINERS._seed_jobs(
+                spec,
+                cpu_threads=3,
+                gpu_ids=(),
+                gpu_offset=0,
+            )
+            for job in jobs:
+                job.evaluation_path.write_text(
+                    json.dumps({
+                        "policy_tag": job.tag,
+                        "summary": {"test_saving_pct": 10.0 + job.seed},
+                    }),
+                    encoding="utf-8",
+                )
+            costs = {0: 300.0, 1: 100.0, 2: 200.0}
+
+            def fake_result(job):
+                return (
+                    costs[job.seed],
+                    10.0 + job.seed,
+                    {"meta": {"seed": job.seed}},
+                )
+
+            fake_torch = SimpleNamespace(save=mock.Mock())
+            with mock.patch.object(
+                TRAINERS, "_load_seed_result", side_effect=fake_result
+            ), mock.patch.dict(sys.modules, {"torch": fake_torch}):
+                TRAINERS._aggregate_seed_outputs(spec, jobs)
+
+            saved_checkpoint = fake_torch.save.call_args.args[0]
+            self.assertEqual(saved_checkpoint["meta"]["selected_seed"], 1)
+            self.assertEqual(
+                saved_checkpoint["meta"]["validation_cost_vnd_by_seed"],
+                {"0": 300.0, "1": 100.0, "2": 200.0},
+            )
+            canonical_evaluation = json.loads(
+                (
+                    spec.output_dir
+                    / f"evaluation_{TRAINERS.RUN_NAME}-tande.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                canonical_evaluation["seed_selection"]["selected_seed"],
+                1,
+            )
 
     def test_trainall_parallel_mode_aggregates_site_failures(self) -> None:
         class ImmediateExecutor:
@@ -253,6 +461,8 @@ class PrivateTrainerManifestTests(unittest.TestCase):
             *,
             dry_run: bool = False,
             cpu_threads: int | None = None,
+            gpu_ids=(),
+            gpu_offset: int = 0,
         ) -> None:
             if spec.slug in {"newing", "songwol"}:
                 raise TRAINERS.PreflightError(f"boom-{spec.slug}")
@@ -261,6 +471,8 @@ class PrivateTrainerManifestTests(unittest.TestCase):
             TRAINERS.concurrent.futures,
             "ThreadPoolExecutor",
             ImmediateExecutor,
+        ), mock.patch.object(
+            TRAINERS, "detect_gpu_ids", return_value=()
         ), mock.patch.object(TRAINERS, "run_site", side_effect=fake_run_site):
             with self.assertRaises(SystemExit) as raised:
                 TRAINERS.run_all(dry_run=False)

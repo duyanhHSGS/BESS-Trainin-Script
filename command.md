@@ -9,6 +9,7 @@ output paths, and experiment arguments live in `private-data-and-results/private
 ```text
 private-data-and-results/
 ├── private-trainers.py
+├── sitecustomize.py
 ├── test_private_trainers.py
 ├── command.md
 ├── archived/
@@ -48,12 +49,18 @@ private-data-and-results/sites/<site>/results/ppo-iq2-coherent-bc-memory/
 
 The launcher refuses to overwrite a non-empty run directory.
 
+Each seed writes a distinct checkpoint and evaluation artifact. After all three finish,
+the launcher selects the checkpoint with the lowest validation cost and writes canonical
+`policy_<run>-<site>.pt` and `evaluation_<run>-<site>.json` artifacts. The canonical
+checkpoint/evaluation records validation cost and test saving for every seed.
+
 ## One-button training
 
-Run every currently enabled site at the same time. The launcher divides all available
-logical CPUs across the site trainer subprocesses, including PyTorch and common numeric
-libraries. Each site keeps its own sequential seed-selection loop and isolated result
-directory:
+Run every currently enabled site at the same time. Every site's seeds `0`, `1`, and `2`
+also run as separate subprocesses at the same time, so `trainall` launches the complete
+site-by-seed matrix instead of leaving seeds in a sequential queue. The launcher divides
+all logical CPUs across sites and then across their seeds. Each site keeps an isolated
+result directory:
 
 ```bash
 cd /home/admin/Desktop/CodeProjects/bess-infra
@@ -96,10 +103,21 @@ trainer defaults:
 - lambda peak: `0.97`
 
 The launcher sets `DRL_RESULTS_DIR` to the selected site's run directory and adds the
-site slug to the trainer tag. For `trainall`, it also assigns each simultaneous trainer
-a share of the machine's logical CPUs through `DRL_TORCH_THREADS`, `OMP_NUM_THREADS`,
+site slug and seed to the trainer tag. It assigns each simultaneous seed trainer a share
+of the machine's logical CPUs through `DRL_TORCH_THREADS`, `OMP_NUM_THREADS`,
 `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. If there are fewer
-CPUs than enabled sites, every site still starts immediately with a one-thread budget.
+CPUs than jobs, every seed still starts immediately with a one-thread budget.
+
+The private `sitecustomize.py` startup shim also exposes only that assigned CPU count to
+each child interpreter. This keeps the core trainer's LP-oracle process pool inside the
+same quota instead of letting every seed spawn workers for the entire machine.
+
+The launcher discovers NVIDIA GPU IDs with `nvidia-smi` and rotates visible devices
+across seed jobs. Override discovery with `PRIVATE_TRAINER_GPUS=0,1` or force CPU-only
+visibility with `PRIVATE_TRAINER_GPUS=cpu`. The current core PPO implementation keeps its
+models and rollout buffers on CPU, so GPU assignment is forward-compatible scheduling,
+not fake acceleration; real CUDA compute still requires a device contract in the core
+trainer. This private launcher deliberately does not modify root-repository code.
 
 ## Preflight contract
 
@@ -151,8 +169,9 @@ Tests intentionally live in the private zone:
 ```
 
 They cover manifest hardware, real configs, real dataset preflight, 96-slot integrity,
-coverage/split behavior, command construction, trainall filtering, disabled-site behavior,
-and output overwrite protection.
+coverage/split behavior, command construction, site/seed parallelism, CPU allocation,
+GPU discovery/visibility, canonical seed selection, disabled-site behavior, and output
+overwrite protection.
 
 Historical checkpoint/result files referenced by older reports may live outside the tracked
 checkout or in ignored runtime storage. This reorganization does not fabricate or delete

@@ -23,6 +23,9 @@ MIN_MONTH_COVERAGE = 0.80
 VAL_MONTHS = 2
 TEST_MONTHS = 1
 STEPS_PER_DAY = 96
+SEEDS: tuple[int, ...] = (0, 1, 2)
+GPU_OVERRIDE_ENV = "PRIVATE_TRAINER_GPUS"
+CPU_COUNT_ENV = "PRIVATE_TRAINER_CPU_COUNT"
 CPU_THREAD_ENV_VARS: tuple[str, ...] = (
     "DRL_TORCH_THREADS",
     "OMP_NUM_THREADS",
@@ -30,14 +33,13 @@ CPU_THREAD_ENV_VARS: tuple[str, ...] = (
     "OPENBLAS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
-# TODO(PARALLEL-TRAIN): benchmark the CPU split per training host and make the
-# launcher GPU-aware once PPO has an explicit device/batching contract.
+# TODO(GPU-TRAIN): remove the forward-compatible GPU assignment shim after the
+# core PPO trainer exposes a real device contract and moves models/buffers to it.
 
 # Keep the experiment receipt explicit. Do not silently inherit trainer defaults:
 # changing a default in run_train_dataset.py must not mutate an old private run.
 TRAIN_ARGS: tuple[str, ...] = (
     "--steps", "1500000",
-    "--seeds", "0,1,2",
     "--rollout", "2880",
     "--eval-every", "20",
     "--min-month-coverage", "0.8",
@@ -124,6 +126,26 @@ class DatasetAudit:
     last_date: date
     month_coverage: Mapping[str, float]
     eligible_months: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SeedJob:
+    spec: SiteSpec
+    seed: int
+    cpu_threads: int
+    gpu_id: str | None = None
+
+    @property
+    def tag(self) -> str:
+        return f"{RUN_NAME}-{self.spec.slug}-seed{self.seed}"
+
+    @property
+    def checkpoint_path(self) -> Path:
+        return self.spec.output_dir / f"policy_{self.tag}.pt"
+
+    @property
+    def evaluation_path(self) -> Path:
+        return self.spec.output_dir / f"evaluation_{self.tag}.json"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -241,8 +263,7 @@ def split_eligible_months(
     return train, holdout[:VAL_MONTHS], holdout[VAL_MONTHS:]
 
 
-def build_command(spec: SiteSpec) -> list[str]:
-    tag = f"{RUN_NAME}-{spec.slug}"
+def build_command(job: SeedJob) -> list[str]:
     return [
         sys.executable,
         "-X",
@@ -250,12 +271,14 @@ def build_command(spec: SiteSpec) -> list[str]:
         "-u",
         str(TRAINER),
         "--csv",
-        str(spec.csv_path),
+        str(job.spec.csv_path),
         "--config-json",
-        str(spec.config_path),
+        str(job.spec.config_path),
         *TRAIN_ARGS,
+        "--seeds",
+        str(job.seed),
         "--tag",
-        tag,
+        job.tag,
     ]
 
 
@@ -342,11 +365,199 @@ def allocate_cpu_threads(
     )
 
 
+def detect_gpu_ids(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return configured or discoverable NVIDIA GPU identifiers."""
+    source = os.environ if environ is None else environ
+    override = source.get(GPU_OVERRIDE_ENV)
+    if override is not None:
+        normalized = override.strip()
+        if not normalized or normalized.lower() in {"none", "cpu", "off"}:
+            return ()
+        gpu_ids = tuple(
+            part.strip() for part in normalized.split(",") if part.strip()
+        )
+        if len(gpu_ids) != len(set(gpu_ids)):
+            raise PreflightError(f"{GPU_OVERRIDE_ENV} contains duplicate GPU IDs")
+        return gpu_ids
+
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ()
+    return tuple(
+        line.strip() for line in completed.stdout.splitlines() if line.strip()
+    )
+
+
+def _seed_jobs(
+    spec: SiteSpec,
+    *,
+    cpu_threads: int | None,
+    gpu_ids: Sequence[str],
+    gpu_offset: int,
+) -> tuple[SeedJob, ...]:
+    total_threads = max(1, cpu_threads or os.cpu_count() or 1)
+    budgets = allocate_cpu_threads(len(SEEDS), total_threads)
+    return tuple(
+        SeedJob(
+            spec=spec,
+            seed=seed,
+            cpu_threads=budget,
+            gpu_id=(
+                gpu_ids[(gpu_offset + index) % len(gpu_ids)]
+                if gpu_ids
+                else None
+            ),
+        )
+        for index, (seed, budget) in enumerate(
+            zip(SEEDS, budgets, strict=True)
+        )
+    )
+
+
+def _seed_environment(job: SeedJob) -> dict[str, str]:
+    env = os.environ.copy()
+    env["DRL_RESULTS_DIR"] = str(job.spec.output_dir)
+    thread_count = str(job.cpu_threads)
+    env[CPU_COUNT_ENV] = thread_count
+    python_path = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(PRIVATE_ROOT), python_path) if part
+    )
+    for variable in CPU_THREAD_ENV_VARS:
+        env[variable] = thread_count
+    if job.gpu_id is not None:
+        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        env["CUDA_VISIBLE_DEVICES"] = job.gpu_id
+        env["NVIDIA_VISIBLE_DEVICES"] = job.gpu_id
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["NVIDIA_VISIBLE_DEVICES"] = "void"
+    return env
+
+
+def _run_seed_job(job: SeedJob) -> None:
+    command = build_command(job)
+    gpu = job.gpu_id if job.gpu_id is not None else "none"
+    print(
+        f"[seed] START {job.spec.display_name} seed={job.seed} "
+        f"threads={job.cpu_threads} visible-gpu={gpu}",
+        flush=True,
+    )
+    subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=_seed_environment(job),
+        check=True,
+    )
+    print(
+        f"[seed] DONE {job.spec.display_name} seed={job.seed}",
+        flush=True,
+    )
+
+
+def _load_seed_result(job: SeedJob) -> tuple[float, float, dict[str, Any]]:
+    try:
+        import torch
+    except ImportError as exc:
+        raise PreflightError("PyTorch is required to merge seed checkpoints") from exc
+    if not job.checkpoint_path.is_file():
+        raise PreflightError(f"missing seed checkpoint: {job.checkpoint_path}")
+    if not job.evaluation_path.is_file():
+        raise PreflightError(f"missing seed evaluation: {job.evaluation_path}")
+    checkpoint = torch.load(
+        job.checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    if not isinstance(checkpoint, dict) or not isinstance(
+        checkpoint.get("meta"), dict
+    ):
+        raise PreflightError(f"invalid seed checkpoint: {job.checkpoint_path}")
+    meta = checkpoint["meta"]
+    try:
+        validation_cost = float(meta["validation_cost_vnd"])
+        evaluation = json.loads(job.evaluation_path.read_text(encoding="utf-8"))
+        test_saving = float(evaluation["summary"]["test_saving_pct"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PreflightError(f"invalid seed result for seed {job.seed}: {exc}") from exc
+    return validation_cost, test_saving, checkpoint
+
+
+def _aggregate_seed_outputs(spec: SiteSpec, jobs: Sequence[SeedJob]) -> None:
+    try:
+        import torch
+    except ImportError as exc:
+        raise PreflightError("PyTorch is required to merge seed checkpoints") from exc
+    results = [
+        (job, *_load_seed_result(job))
+        for job in jobs
+    ]
+    selected_job, selected_cost, selected_saving, selected_checkpoint = min(
+        results,
+        key=lambda result: result[1],
+    )
+    validation_by_seed = {
+        str(job.seed): validation_cost
+        for job, validation_cost, _test_saving, _checkpoint in results
+    }
+    savings_by_seed = {
+        str(job.seed): test_saving
+        for job, _validation_cost, test_saving, _checkpoint in results
+    }
+    meta = selected_checkpoint["meta"]
+    meta.update({
+        "seeds": list(SEEDS),
+        "selected_seed": selected_job.seed,
+        "selection_protocol": "mean_val_cost_over_seeds_then_best_seed",
+        "parallel_seed_execution": True,
+        "validation_cost_vnd_by_seed": validation_by_seed,
+        "test_saving_pct_by_seed": [
+            savings_by_seed[str(seed)] for seed in SEEDS
+        ],
+    })
+    canonical_tag = f"{RUN_NAME}-{spec.slug}"
+    canonical_checkpoint = spec.output_dir / f"policy_{canonical_tag}.pt"
+    torch.save(selected_checkpoint, canonical_checkpoint)
+
+    selected_evaluation = json.loads(
+        selected_job.evaluation_path.read_text(encoding="utf-8")
+    )
+    selected_evaluation["policy_tag"] = canonical_tag
+    selected_evaluation["seed_selection"] = {
+        "protocol": "parallel_seeds_then_min_validation_cost",
+        "selected_seed": selected_job.seed,
+        "selected_validation_cost_vnd": selected_cost,
+        "selected_test_saving_pct": selected_saving,
+        "validation_cost_vnd_by_seed": validation_by_seed,
+        "test_saving_pct_by_seed": savings_by_seed,
+    }
+    canonical_evaluation = spec.output_dir / f"evaluation_{canonical_tag}.json"
+    canonical_evaluation.write_text(
+        json.dumps(selected_evaluation, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    print(
+        f"[seed] SELECT {spec.display_name} seed={selected_job.seed} "
+        f"validation={selected_cost:.2f} test-saving={selected_saving:.2f}%",
+        flush=True,
+    )
+
+
 def run_site(
     spec: SiteSpec,
     *,
     dry_run: bool = False,
     cpu_threads: int | None = None,
+    gpu_ids: Sequence[str] = (),
+    gpu_offset: int = 0,
 ) -> None:
     if not spec.enabled:
         raise PreflightError(f"{spec.display_name} disabled: {spec.disabled_reason}")
@@ -354,20 +565,36 @@ def run_site(
         raise ValueError("cpu_threads must be >= 1")
     audit, train, validation, test, raw = preflight(spec)
     _print_preflight(spec, audit, train, validation, test, raw)
-    command = build_command(spec)
-    print("COMMAND    :", " ".join(command))
+    jobs = _seed_jobs(
+        spec,
+        cpu_threads=cpu_threads,
+        gpu_ids=gpu_ids,
+        gpu_offset=gpu_offset,
+    )
+    for job in jobs:
+        print("COMMAND    :", " ".join(build_command(job)))
     if dry_run:
         print("DRY RUN    : no training started")
         return
 
     _prepare_output(spec)
-    env = os.environ.copy()
-    env["DRL_RESULTS_DIR"] = str(spec.output_dir)
-    if cpu_threads is not None:
-        thread_count = str(cpu_threads)
-        for variable in CPU_THREAD_ENV_VARS:
-            env[variable] = thread_count
-    subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
+    failures: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+        future_to_job = {
+            executor.submit(_run_seed_job, job): job
+            for job in jobs
+        }
+        for future in concurrent.futures.as_completed(future_to_job):
+            job = future_to_job[future]
+            try:
+                future.result()
+            except subprocess.CalledProcessError as exc:
+                failures.append(f"seed {job.seed}: {exc}")
+    if failures:
+        raise PreflightError(
+            f"{spec.display_name} seed training failed: {' | '.join(failures)}"
+        )
+    _aggregate_seed_outputs(spec, jobs)
 
 
 def run_all(*, dry_run: bool = False) -> None:
@@ -398,10 +625,12 @@ def run_all(*, dry_run: bool = False) -> None:
 
     workers = len(enabled_specs)
     cpu_budgets = allocate_cpu_threads(workers)
+    gpu_ids = detect_gpu_ids()
     print(
         f"[trainall] starting {len(enabled_specs)} enabled sites with "
         f"{workers} parallel workers across {sum(cpu_budgets)} logical CPU threads "
-        f"(per-site budgets: {', '.join(map(str, cpu_budgets))})",
+        f"(per-site budgets: {', '.join(map(str, cpu_budgets))}); "
+        f"visible GPUs: {', '.join(gpu_ids) if gpu_ids else 'none'}",
         flush=True,
     )
     failures: list[str] = []
@@ -412,8 +641,12 @@ def run_all(*, dry_run: bool = False) -> None:
                 spec,
                 dry_run=False,
                 cpu_threads=cpu_threads,
+                gpu_ids=gpu_ids,
+                gpu_offset=site_index * len(SEEDS),
             ): spec
-            for spec, cpu_threads in zip(enabled_specs, cpu_budgets, strict=True)
+            for site_index, (spec, cpu_threads) in enumerate(
+                zip(enabled_specs, cpu_budgets, strict=True)
+            )
         }
         for future in concurrent.futures.as_completed(future_to_spec):
             spec = future_to_spec[future]
@@ -451,7 +684,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.target == "trainall":
             run_all(dry_run=args.dry_run)
         else:
-            run_site(SITES[args.target], dry_run=args.dry_run)
+            run_site(
+                SITES[args.target],
+                dry_run=args.dry_run,
+                gpu_ids=detect_gpu_ids(),
+            )
     except PreflightError as exc:
         print(f"preflight failed: {exc}", file=sys.stderr)
         return 2

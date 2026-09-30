@@ -485,7 +485,20 @@ def _load_seed_result(job: SeedJob) -> tuple[float, float, dict[str, Any]]:
     try:
         validation_cost = float(meta["validation_cost_vnd"])
         evaluation = json.loads(job.evaluation_path.read_text(encoding="utf-8"))
-        test_saving = float(evaluation["summary"]["test_saving_pct"])
+        metrics = evaluation.get("metrics")
+        if isinstance(metrics, dict) and "test_saving_pct" in metrics:
+            test_saving = float(metrics["test_saving_pct"])
+        else:
+            # TODO(PRIVATE-EVAL-SCHEMA): remove this legacy fallback after all
+            # retained unversioned evaluation artifacts have migrated to schema >= 2.1.
+            summary = evaluation.get("summary")
+            if (
+                evaluation.get("schema_version") is not None
+                or not isinstance(summary, dict)
+                or "test_saving_pct" not in summary
+            ):
+                raise KeyError("metrics.test_saving_pct")
+            test_saving = float(summary["test_saving_pct"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise PreflightError(f"invalid seed result for seed {job.seed}: {exc}") from exc
     return validation_cost, test_saving, checkpoint

@@ -385,6 +385,126 @@ class PrivateTrainerManifestTests(unittest.TestCase):
                 TRAINERS.run_site(spec, cpu_threads=3)
         aggregate.assert_not_called()
 
+    def test_load_seed_result_reads_schema_2_1_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            TRAINERS, "PRIVATE_ROOT", Path(tmp)
+        ):
+            spec = deepcopy(TRAINERS.SITES["tande"])
+            job = TRAINERS._seed_jobs(
+                spec, cpu_threads=3, gpu_ids=(), gpu_offset=0
+            )[0]
+            spec.output_dir.mkdir(parents=True)
+            job.checkpoint_path.write_bytes(b"checkpoint")
+            job.evaluation_path.write_text(
+                json.dumps({
+                    "schema_version": "2.1",
+                    "policy_tag": job.tag,
+                    "metrics": {"test_saving_pct": 12.34},
+                }),
+                encoding="utf-8",
+            )
+            checkpoint = {"meta": {"validation_cost_vnd": 123.0}}
+            fake_torch = SimpleNamespace(load=mock.Mock(return_value=checkpoint))
+            with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+                validation_cost, test_saving, loaded = TRAINERS._load_seed_result(job)
+
+            self.assertEqual(validation_cost, 123.0)
+            self.assertEqual(test_saving, 12.34)
+            self.assertIs(loaded, checkpoint)
+
+    def test_load_seed_result_prefers_metrics_over_legacy_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            TRAINERS, "PRIVATE_ROOT", Path(tmp)
+        ):
+            spec = deepcopy(TRAINERS.SITES["tande"])
+            job = TRAINERS._seed_jobs(
+                spec, cpu_threads=3, gpu_ids=(), gpu_offset=0
+            )[0]
+            spec.output_dir.mkdir(parents=True)
+            job.checkpoint_path.write_bytes(b"checkpoint")
+            job.evaluation_path.write_text(
+                json.dumps({
+                    "schema_version": "2.1",
+                    "metrics": {"test_saving_pct": 8.5},
+                    "summary": {"test_saving_pct": 99.0},
+                }),
+                encoding="utf-8",
+            )
+            checkpoint = {"meta": {"validation_cost_vnd": 321.0}}
+            fake_torch = SimpleNamespace(load=mock.Mock(return_value=checkpoint))
+            with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+                _validation_cost, test_saving, _loaded = TRAINERS._load_seed_result(job)
+
+            self.assertEqual(test_saving, 8.5)
+
+    def test_load_seed_result_accepts_legacy_summary_during_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            TRAINERS, "PRIVATE_ROOT", Path(tmp)
+        ):
+            spec = deepcopy(TRAINERS.SITES["tande"])
+            job = TRAINERS._seed_jobs(
+                spec, cpu_threads=3, gpu_ids=(), gpu_offset=0
+            )[0]
+            spec.output_dir.mkdir(parents=True)
+            job.checkpoint_path.write_bytes(b"checkpoint")
+            job.evaluation_path.write_text(
+                json.dumps({"summary": {"test_saving_pct": 7.25}}),
+                encoding="utf-8",
+            )
+            checkpoint = {"meta": {"validation_cost_vnd": 456.0}}
+            fake_torch = SimpleNamespace(load=mock.Mock(return_value=checkpoint))
+            with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+                _validation_cost, test_saving, _loaded = TRAINERS._load_seed_result(job)
+
+            self.assertEqual(test_saving, 7.25)
+
+    def test_load_seed_result_rejects_versioned_legacy_summary_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            TRAINERS, "PRIVATE_ROOT", Path(tmp)
+        ):
+            spec = deepcopy(TRAINERS.SITES["tande"])
+            job = TRAINERS._seed_jobs(
+                spec, cpu_threads=3, gpu_ids=(), gpu_offset=0
+            )[0]
+            spec.output_dir.mkdir(parents=True)
+            job.checkpoint_path.write_bytes(b"checkpoint")
+            job.evaluation_path.write_text(
+                json.dumps({
+                    "schema_version": "2.1",
+                    "summary": {"test_saving_pct": 99.0},
+                }),
+                encoding="utf-8",
+            )
+            checkpoint = {"meta": {"validation_cost_vnd": 654.0}}
+            fake_torch = SimpleNamespace(load=mock.Mock(return_value=checkpoint))
+            with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+                with self.assertRaisesRegex(
+                    TRAINERS.PreflightError, "metrics.test_saving_pct"
+                ):
+                    TRAINERS._load_seed_result(job)
+
+    def test_load_seed_result_rejects_missing_test_saving_metric(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            TRAINERS, "PRIVATE_ROOT", Path(tmp)
+        ):
+            spec = deepcopy(TRAINERS.SITES["tande"])
+            job = TRAINERS._seed_jobs(
+                spec, cpu_threads=3, gpu_ids=(), gpu_offset=0
+            )[0]
+            spec.output_dir.mkdir(parents=True)
+            job.checkpoint_path.write_bytes(b"checkpoint")
+            job.evaluation_path.write_text(
+                json.dumps({"schema_version": "2.1", "metrics": {}}),
+                encoding="utf-8",
+            )
+            checkpoint = {"meta": {"validation_cost_vnd": 789.0}}
+            fake_torch = SimpleNamespace(load=mock.Mock(return_value=checkpoint))
+            with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+                with self.assertRaisesRegex(
+                    TRAINERS.PreflightError, "metrics.test_saving_pct"
+                ):
+                    TRAINERS._load_seed_result(job)
+
     def test_aggregate_selects_lowest_validation_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
             TRAINERS, "PRIVATE_ROOT", Path(tmp)
@@ -400,8 +520,9 @@ class PrivateTrainerManifestTests(unittest.TestCase):
             for job in jobs:
                 job.evaluation_path.write_text(
                     json.dumps({
+                        "schema_version": "2.1",
                         "policy_tag": job.tag,
-                        "summary": {"test_saving_pct": 10.0 + job.seed},
+                        "metrics": {"test_saving_pct": 10.0 + job.seed},
                     }),
                     encoding="utf-8",
                 )

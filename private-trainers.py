@@ -96,11 +96,7 @@ SITES: dict[str, SiteSpec] = {
     "youngone": SiteSpec("youngone", "YoungOne", 500.0, 1000.0),
     "songwol": SiteSpec("songwol", "Songwol", 450.0, 1250.0),
     "minhdanh": SiteSpec("minhdanh", "Minh Danh", 250.0, 500.0),
-    # Preserved historical cross-site experiment; selectable directly but not part
-    # of the six-site trainall batch supplied on 2026-09-25.
-    "tande": SiteSpec(
-        "tande", "Tande", 450.0, 1250.0, include_in_trainall=False
-    ),
+    "tande": SiteSpec("tande", "Tande", 450.0, 1250.0),
 }
 
 TRAIN_ALL_ORDER: tuple[str, ...] = (
@@ -110,6 +106,7 @@ TRAIN_ALL_ORDER: tuple[str, ...] = (
     "youngone",
     "songwol",
     "minhdanh",
+    "tande",
 )
 
 
@@ -400,7 +397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "target",
         choices=["trainall", *SITES],
-        help="One site slug or trainall for the six-site batch.",
+        help="One site slug or trainall for the seven-site batch.",
     )
     parser.add_argument(
         "--dry-run",

@@ -29,6 +29,7 @@ class PrivateTrainerManifestTests(unittest.TestCase):
             "youngone": (500.0, 1000.0),
             "songwol": (450.0, 1250.0),
             "minhdanh": (250.0, 500.0),
+            "tande": (450.0, 1250.0),
         }
         for slug, (power, energy) in expected.items():
             with self.subTest(site=slug):
@@ -36,16 +37,25 @@ class PrivateTrainerManifestTests(unittest.TestCase):
                 self.assertEqual(spec.expected_p_rated_kw, power)
                 self.assertEqual(spec.expected_e_cap_kwh, energy)
 
-    def test_trainall_order_is_exactly_the_official_six(self) -> None:
+    def test_trainall_order_includes_tande(self) -> None:
         self.assertEqual(
             TRAINERS.TRAIN_ALL_ORDER,
-            ("amy", "namduoc", "newing", "youngone", "songwol", "minhdanh"),
+            (
+                "amy",
+                "namduoc",
+                "newing",
+                "youngone",
+                "songwol",
+                "minhdanh",
+                "tande",
+            ),
         )
 
-    def test_tande_is_preserved_but_not_in_trainall(self) -> None:
+    def test_tande_is_enabled_in_trainall(self) -> None:
         self.assertIn("tande", TRAINERS.SITES)
-        self.assertFalse(TRAINERS.SITES["tande"].include_in_trainall)
-        self.assertNotIn("tande", TRAINERS.TRAIN_ALL_ORDER)
+        self.assertTrue(TRAINERS.SITES["tande"].enabled)
+        self.assertTrue(TRAINERS.SITES["tande"].include_in_trainall)
+        self.assertIn("tande", TRAINERS.TRAIN_ALL_ORDER)
 
     def test_namduoc_is_explicitly_blocked(self) -> None:
         spec = TRAINERS.SITES["namduoc"]
@@ -102,13 +112,15 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         self.assertIn("youngone", youngone.parts)
         self.assertIn("newing", newing.parts)
 
-    def test_trainall_skips_disabled_site_and_tande(self) -> None:
+    def test_trainall_skips_only_disabled_site(self) -> None:
         with mock.patch.object(TRAINERS, "run_site") as run_site:
             TRAINERS.run_all(dry_run=True)
         called_slugs = [call.args[0].slug for call in run_site.call_args_list]
-        self.assertEqual(called_slugs, ["amy", "newing", "youngone", "songwol", "minhdanh"])
+        self.assertEqual(
+            called_slugs,
+            ["amy", "newing", "youngone", "songwol", "minhdanh", "tande"],
+        )
         self.assertNotIn("namduoc", called_slugs)
-        self.assertNotIn("tande", called_slugs)
 
     def test_trainall_uses_bounded_parallel_workers_for_real_training(self) -> None:
         recorded_workers: list[int] = []
@@ -142,7 +154,7 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         called_slugs = sorted(call.args[0].slug for call in run_site.call_args_list)
         self.assertEqual(
             called_slugs,
-            sorted(["amy", "newing", "youngone", "songwol", "minhdanh"]),
+            sorted(["amy", "newing", "youngone", "songwol", "minhdanh", "tande"]),
         )
         self.assertTrue(all(call.kwargs == {"dry_run": False} for call in run_site.call_args_list))
 

@@ -54,25 +54,24 @@ Run every currently enabled official site with up to four sites training in para
 
 ```bash
 cd /home/admin/Desktop/CodeProjects/bess-infra
-.venv/bin/python -X utf8 private-data-and-results/private-trainers.py trainall
+.venv-linux/bin/python -X utf8 private-data-and-results/private-trainers.py trainall
 ```
 
 Dry-run every preflight and print the exact commands without training. Dry-run stays sequential so the audit output remains readable:
 
 ```bash
-.venv/bin/python -X utf8 private-data-and-results/private-trainers.py trainall --dry-run
+.venv-linux/bin/python -X utf8 private-data-and-results/private-trainers.py trainall --dry-run
 ```
 
 Train one site:
 
 ```bash
-.venv/bin/python -X utf8 private-data-and-results/private-trainers.py youngone
-.venv/bin/python -X utf8 private-data-and-results/private-trainers.py newing
-.venv/bin/python -X utf8 private-data-and-results/private-trainers.py songwol
+.venv-linux/bin/python -X utf8 private-data-and-results/private-trainers.py youngone
+.venv-linux/bin/python -X utf8 private-data-and-results/private-trainers.py newing
+.venv-linux/bin/python -X utf8 private-data-and-results/private-trainers.py songwol
 ```
 
-Tande is preserved as a historical cross-site experiment and can be selected directly,
-but it is not part of the six-site `trainall` batch.
+Tande is included in `trainall` and can also be selected directly.
 
 ## Hardcoded IQ2 experiment receipt
 
@@ -123,7 +122,7 @@ showing which older month will actually become test.
 | YoungOne | 500 | 1000 | yes |
 | Songwol | 450 | 1250 | yes |
 | Minh Danh | 250 | 500 | yes |
-| Tande | 450 | 1250 | direct only |
+| Tande | 450 | 1250 | yes |
 
 Nam Dược is blocked because the newly pulled dataset cannot form the required
 train/validation/test split and its only August day has a dead-looking 0 kW load signal.
@@ -142,7 +141,7 @@ site-specific contracts before treating cross-site savings as production-compara
 Tests intentionally live in the private zone:
 
 ```bash
-.venv/bin/python -m pytest private-data-and-results/test_private_trainers.py
+.venv-linux/bin/python -m pytest private-data-and-results/test_private_trainers.py
 ```
 
 They cover manifest hardware, real configs, real dataset preflight, 96-slot integrity,

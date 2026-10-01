@@ -181,3 +181,19 @@ overwrite protection.
 Historical checkpoint/result files referenced by older reports may live outside the tracked
 checkout or in ignored runtime storage. This reorganization does not fabricate or delete
 those unavailable files; all new outputs use the site-scoped layout above.
+
+## Pure rule-based benchmark
+
+The deterministic, causal DRL comparison application lives entirely in the private
+repository under `rule-based/`. It reuses the parent repository's configuration,
+tariff, fixed-block billing, physical-bound, and scoring contracts, but imports no
+learned policy code.
+
+```bash
+.venv-linux/bin/python private-data-and-results/rule-based/run.py amy
+.venv-linux/bin/python private-data-and-results/rule-based/run.py all
+.venv-linux/bin/python -m pytest private-data-and-results/rule-based/tests
+```
+
+Generated benchmark JSON goes to `rule-based/results/` and is ignored. See
+`rule-based/README.md` for the priority ladder and causal peak-target definition.

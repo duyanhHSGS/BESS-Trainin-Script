@@ -18,9 +18,9 @@ from typing import Any
 PRIVATE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PRIVATE_ROOT.parent
 TRAINER = REPO_ROOT / "bess-drl/src/bess_drl/training/drl_engine/run_train_dataset.py"
-RUN_NAME = "iq6_causal_peak_target_actor_v1"
-# TODO(IQ6-EXPERIMENT-RECEIPT): keep this private run identity pinned to the
-# causal peak-target actor experiment until the full six-site comparison is reported.
+RUN_NAME = "iq7_drop_stale_actor_inputs_v1"
+# TODO(IQ7-EXPERIMENT-RECEIPT): keep this private run identity pinned to the
+# stale-actor-input ablation until the full six-site IQ6->IQ7 comparison is reported.
 MIN_MONTH_COVERAGE = 0.80
 VAL_MONTHS = 2
 TEST_MONTHS = 1

@@ -44,7 +44,7 @@ private-data-and-results/
 Training outputs are created at runtime under:
 
 ```text
-private-data-and-results/sites/<site>/results/iq6_causal_peak_target_actor_v1/
+private-data-and-results/sites/<site>/results/iq7_drop_stale_actor_inputs_v1/
 ```
 
 The launcher refuses to overwrite a non-empty run directory.
@@ -87,14 +87,17 @@ Tande is included in `trainall` and can also be selected directly.
 
 **TODO(IQ2-TANDE-GUARD):** before launching Tande in a future batch, confirm the experiment is not merely reproducing the rejected `ppo-iq2-coherent-bc-memory-tande` recipe and record the changed hypothesis in `sites/tande/report.md`.
 
-## Hardcoded IQ6 experiment receipt
+## Hardcoded IQ7 experiment receipt
 
 `private-trainers.py` explicitly passes the training values below instead of
-inheriting mutable trainer defaults. IQ6's causal-feature constants are pinned
-in the shared `engine/causal_peak_target.py` module and recorded in checkpoint
-metadata so runtime and training cannot silently diverge:
+inheriting mutable trainer defaults. IQ7 keeps IQ6's causal peak-target feature
+but removes four stale actor inputs: previous effective load, previous PV
+surplus, previous BESS power, and previous completed demand. The fixed-block
+phase/booked-import eyes remain because they are current billing state, not
+redundant history. No replacement eye is added. Causal-feature constants remain
+pinned in `engine/causal_peak_target.py` and are recorded in checkpoint metadata:
 
-- run: `iq6_causal_peak_target_actor_v1`
+- run: `iq7_drop_stale_actor_inputs_v1`
 - steps: `1,500,000`
 - seeds: `0,1,2`
 - rollout: `2880`

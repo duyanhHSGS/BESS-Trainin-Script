@@ -44,7 +44,7 @@ private-data-and-results/
 Training outputs are created at runtime under:
 
 ```text
-private-data-and-results/sites/<site>/results/iq5_current_slot_actor_v1/
+private-data-and-results/sites/<site>/results/iq6_causal_peak_target_actor_v1/
 ```
 
 The launcher refuses to overwrite a non-empty run directory.
@@ -87,12 +87,14 @@ Tande is included in `trainall` and can also be selected directly.
 
 **TODO(IQ2-TANDE-GUARD):** before launching Tande in a future batch, confirm the experiment is not merely reproducing the rejected `ppo-iq2-coherent-bc-memory-tande` recipe and record the changed hypothesis in `sites/tande/report.md`.
 
-## Hardcoded IQ5 experiment receipt
+## Hardcoded IQ6 experiment receipt
 
-`private-trainers.py` explicitly passes these values instead of inheriting mutable
-trainer defaults:
+`private-trainers.py` explicitly passes the training values below instead of
+inheriting mutable trainer defaults. IQ6's causal-feature constants are pinned
+in the shared `engine/causal_peak_target.py` module and recorded in checkpoint
+metadata so runtime and training cannot silently diverge:
 
-- run: `iq5_current_slot_actor_v1`
+- run: `iq6_causal_peak_target_actor_v1`
 - steps: `1,500,000`
 - seeds: `0,1,2`
 - rollout: `2880`
@@ -105,6 +107,9 @@ trainer defaults:
 - behaviour-cloning epochs: `10`
 - lambda energy: `0.97`
 - lambda peak: `0.97`
+- causal peak history: previous `30` observed no-BESS daily fixed-block peaks
+- causal peak statistic: robust `q90` with one-sided `3-MAD` cap
+- sustainable peak duration: `5.0` hours
 
 The launcher sets `DRL_RESULTS_DIR` to the selected site's run directory and adds the
 site slug and seed to the trainer tag. It assigns each simultaneous seed trainer a share
@@ -122,7 +127,7 @@ visibility with `PRIVATE_TRAINER_GPUS=cpu`. PPO rollout collection and tiny infe
 steps remain on CPU, while optimizer-heavy behaviour cloning and PPO updates use the
 core trainer's `DRL_TRAIN_DEVICE=auto` contract and select CUDA when available. The
 launcher therefore assigns real GPU visibility to seed jobs without changing PPO math.
-The launcher targets the root trainer's IQ5 current-slot observation contract.
+The launcher targets the root trainer's IQ6 observation contract: IQ5's current-slot measurements plus one advisory causal peak target derived from the previous 30 observed no-BESS daily peaks. The actor is 21-D, the asymmetric critic is 31-D, and reward/PPO/action mapping remain unchanged.
 
 ## Preflight contract
 

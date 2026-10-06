@@ -92,7 +92,7 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(TRAINERS.PreflightError, "BESS energy"):
             TRAINERS.validate_config(spec, raw)
 
-    def test_build_command_hardcodes_iq5_experiment_receipt(self) -> None:
+    def test_build_command_hardcodes_iq6_experiment_receipt(self) -> None:
         spec = TRAINERS.SITES["newing"]
         job = TRAINERS.SeedJob(spec=spec, seed=1, cpu_threads=4, gpu_id="0")
         command = TRAINERS.build_command(job)
@@ -105,7 +105,7 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         self.assertIn("2880", command)
         self.assertIn("3e-5", command)
         self.assertIn("3e-4", command)
-        self.assertIn("iq5_current_slot_actor_v1-newing-seed1", command)
+        self.assertIn("iq6_causal_peak_target_actor_v1-newing-seed1", command)
 
     def test_output_directory_is_scoped_by_site_and_run(self) -> None:
         youngone = TRAINERS.SITES["youngone"].output_dir

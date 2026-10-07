@@ -1,3 +1,12 @@
+"""Private multi-site training launcher and experiment failure ledger.
+
+IQ5, IQ6, and IQ7 are retained only as forensic receipts.  Their offline actor
+observations consumed the completed 15-minute average for slot ``t`` before
+choosing ``action[t]``.  Production instead had only a boundary-time live
+sample, so those runs were not causal deployment comparisons and must never be
+launched or promoted again.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -19,8 +28,24 @@ PRIVATE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PRIVATE_ROOT.parent
 TRAINER = REPO_ROOT / "bess-drl/src/bess_drl/training/drl_engine/run_train_dataset.py"
 RUN_NAME = "iq7_drop_stale_actor_inputs_v1"
-# TODO(IQ7-EXPERIMENT-RECEIPT): keep this private run identity pinned to the
-# stale-actor-input ablation until the full six-site IQ6->IQ7 comparison is reported.
+# The rejected name stays pinned here so old private outputs remain attributable;
+# validate_experiment_contract() prevents this forensic receipt from being run.
+REJECTED_EXPERIMENTS: dict[str, str] = {
+    "iq5_current_slot_actor_v1": (
+        "first actor-observation leak: day.load[t]/day.pv_potential[t] were "
+        "completed slot averages presented before action[t]"
+    ),
+    "iq6_causal_peak_target_actor_v1": (
+        "inherited IQ5's non-causal current-slot actor inputs"
+    ),
+    "iq7_drop_stale_actor_inputs_v1": (
+        "inherited IQ5's leak and removed four causal previous-slot inputs"
+    ),
+}
+CAUSAL_BASELINE = "iq4_privileged_critic_v1"
+# TODO(CAUSAL-TRAINING-REENTRY): permit a post-IQ4 successor only after an
+# explicit obs_t causality test proves slot-t completed aggregates cannot affect
+# obs_t/action_t and can first affect obs_(t+1).
 MIN_MONTH_COVERAGE = 0.80
 VAL_MONTHS = 2
 TEST_MONTHS = 1
@@ -60,6 +85,19 @@ TRAIN_ARGS: tuple[str, ...] = (
 
 class PreflightError(RuntimeError):
     """Raised before expensive training when private experiment inputs are unsafe."""
+
+
+def validate_experiment_contract(run_name: str) -> None:
+    """Reject experiment receipts known to violate the causal actor contract."""
+    normalized = run_name.strip()
+    if not normalized:
+        raise PreflightError("experiment run name must not be empty")
+    for rejected_name, failure in REJECTED_EXPERIMENTS.items():
+        if normalized == rejected_name or normalized.startswith(f"{rejected_name}-"):
+            raise PreflightError(
+                f"rejected non-causal experiment {normalized!r}: {failure}; "
+                f"return to {CAUSAL_BASELINE} and retrain from scratch"
+            )
 
 
 @dataclass(frozen=True)
@@ -293,6 +331,7 @@ def preflight(
     tuple[str, ...],
     dict[str, Any],
 ]:
+    validate_experiment_contract(RUN_NAME)
     if not TRAINER.is_file():
         raise PreflightError(f"trainer not found: {TRAINER}")
     raw = _load_json(spec.config_path)

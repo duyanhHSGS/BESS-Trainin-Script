@@ -105,7 +105,7 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         self.assertIn("2880", command)
         self.assertIn("3e-5", command)
         self.assertIn("3e-4", command)
-        self.assertIn("iq8_causal_peak_target_v1-newing-seed1", command)
+        self.assertIn("iq9_big_brain_256_v1-newing-seed1", command)
 
     def test_failure_ledger_names_every_noncausal_lineage_member(self) -> None:
         self.assertEqual(

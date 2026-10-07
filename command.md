@@ -44,7 +44,7 @@ private-data-and-results/
 Training outputs are created at runtime under:
 
 ```text
-private-data-and-results/sites/<site>/results/iq7_drop_stale_actor_inputs_v1/
+private-data-and-results/sites/<site>/results/iq9_big_brain_256_v1/
 ```
 
 The launcher refuses to overwrite a non-empty run directory.
@@ -87,17 +87,18 @@ Tande is included in `trainall` and can also be selected directly.
 
 **TODO(IQ2-TANDE-GUARD):** before launching Tande in a future batch, confirm the experiment is not merely reproducing the rejected `ppo-iq2-coherent-bc-memory-tande` recipe and record the changed hypothesis in `sites/tande/report.md`.
 
-## Hardcoded IQ7 experiment receipt
+## Hardcoded IQ9 experiment receipt
 
 `private-trainers.py` explicitly passes the training values below instead of
-inheriting mutable trainer defaults. IQ7 keeps IQ6's causal peak-target feature
-but removes four stale actor inputs: previous effective load, previous PV
-surplus, previous BESS power, and previous completed demand. The fixed-block
-phase/booked-import eyes remain because they are current billing state, not
-redundant history. No replacement eye is added. Causal-feature constants remain
-pinned in `engine/causal_peak_target.py` and are recorded in checkpoint metadata:
+inheriting mutable trainer defaults. IQ9 is a capacity-only ablation of the clean
+IQ8 causal policy: the 18-D actor observation, causal completed-day peak target,
+feasible-fraction action mapping, reward math, PopArt critics, behaviour cloning,
+and PPO schedule stay unchanged. The sole intended model change is recurrent
+hidden width 128 -> 256 for both actor and critic GRUs/encoders. Causal-feature
+constants remain pinned and are recorded in checkpoint metadata:
 
-- run: `iq7_drop_stale_actor_inputs_v1`
+- run: `iq9_big_brain_256_v1`
+- recurrent hidden width: `256` (IQ8 baseline: `128`)
 - steps: `1,500,000`
 - seeds: `0,1,2`
 - rollout: `2880`
@@ -130,7 +131,9 @@ visibility with `PRIVATE_TRAINER_GPUS=cpu`. PPO rollout collection and tiny infe
 steps remain on CPU, while optimizer-heavy behaviour cloning and PPO updates use the
 core trainer's `DRL_TRAIN_DEVICE=auto` contract and select CUDA when available. The
 launcher therefore assigns real GPU visibility to seed jobs without changing PPO math.
-The launcher targets the root trainer's IQ6 observation contract: IQ5's current-slot measurements plus one advisory causal peak target derived from the previous 30 observed no-BESS daily peaks. The actor is 21-D, the asymmetric critic is 31-D, and reward/PPO/action mapping remain unchanged.
+The launcher targets the root trainer's clean IQ8 causal observation contract plus IQ9's 256-wide recurrent capacity. The actor is 18-D, the asymmetric critic is 28-D, current-slot completed load/PV never enter the actor, and reward/PPO/action mapping remain unchanged.
+
+**TODO(IQ9-BIG-BRAIN):** compare all six sites and three seeds against IQ8 before promoting the wider recurrent model; extra parameters are not an IQ gain unless untouched validation/test economics improve.
 
 ## Preflight contract
 

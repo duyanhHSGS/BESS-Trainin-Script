@@ -27,7 +27,8 @@ from typing import Any
 PRIVATE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PRIVATE_ROOT.parent
 TRAINER = REPO_ROOT / "bess-drl/src/bess_drl/training/drl_engine/run_train_dataset.py"
-RUN_NAME = "iq8_causal_peak_target_v1"
+RUN_NAME = "iq9_big_brain_256_v1"
+# TODO(IQ9-BIG-BRAIN): keep this receipt pinned to the 256-wide IQ8-capacity ablation.
 # IQ8 returns to the causal IQ4 observation timing, then adds only IQ6's useful
 # completed-history peak-target philosophy. IQ5/IQ6/IQ7 remain rejected below.
 REJECTED_EXPERIMENTS: dict[str, str] = {

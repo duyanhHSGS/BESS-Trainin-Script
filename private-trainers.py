@@ -27,9 +27,9 @@ from typing import Any
 PRIVATE_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PRIVATE_ROOT.parent
 TRAINER = REPO_ROOT / "bess-drl/src/bess_drl/training/drl_engine/run_train_dataset.py"
-RUN_NAME = "iq7_drop_stale_actor_inputs_v1"
-# The rejected name stays pinned here so old private outputs remain attributable;
-# validate_experiment_contract() prevents this forensic receipt from being run.
+RUN_NAME = "iq8_causal_peak_target_v1"
+# IQ8 returns to the causal IQ4 observation timing, then adds only IQ6's useful
+# completed-history peak-target philosophy. IQ5/IQ6/IQ7 remain rejected below.
 REJECTED_EXPERIMENTS: dict[str, str] = {
     "iq5_current_slot_actor_v1": (
         "first actor-observation leak: day.load[t]/day.pv_potential[t] were "
@@ -43,9 +43,9 @@ REJECTED_EXPERIMENTS: dict[str, str] = {
     ),
 }
 CAUSAL_BASELINE = "iq4_privileged_critic_v1"
-# TODO(CAUSAL-TRAINING-REENTRY): permit a post-IQ4 successor only after an
-# explicit obs_t causality test proves slot-t completed aggregates cannot affect
-# obs_t/action_t and can first affect obs_(t+1).
+# TODO(IQ8-CAUSAL-PEAK): keep the explicit obs_t causality regression pinned:
+# slot-t measured aggregates must not affect obs_t/action_t and may first affect
+# obs_(t+1); never relax this contract for a better-looking holdout score.
 MIN_MONTH_COVERAGE = 0.80
 VAL_MONTHS = 2
 TEST_MONTHS = 1

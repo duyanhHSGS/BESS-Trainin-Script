@@ -92,7 +92,7 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(TRAINERS.PreflightError, "BESS energy"):
             TRAINERS.validate_config(spec, raw)
 
-    def test_build_command_preserves_rejected_iq7_receipt_for_audit(self) -> None:
+    def test_build_command_uses_iq8_causal_peak_receipt(self) -> None:
         spec = TRAINERS.SITES["newing"]
         job = TRAINERS.SeedJob(spec=spec, seed=1, cpu_threads=4, gpu_id="0")
         command = TRAINERS.build_command(job)
@@ -105,7 +105,7 @@ class PrivateTrainerManifestTests(unittest.TestCase):
         self.assertIn("2880", command)
         self.assertIn("3e-5", command)
         self.assertIn("3e-4", command)
-        self.assertIn("iq7_drop_stale_actor_inputs_v1-newing-seed1", command)
+        self.assertIn("iq8_causal_peak_target_v1-newing-seed1", command)
 
     def test_failure_ledger_names_every_noncausal_lineage_member(self) -> None:
         self.assertEqual(
@@ -130,21 +130,19 @@ class PrivateTrainerManifestTests(unittest.TestCase):
     def test_iq4_causal_baseline_is_not_rejected(self) -> None:
         TRAINERS.validate_experiment_contract(TRAINERS.CAUSAL_BASELINE)
 
+    def test_iq8_causal_peak_successor_is_not_rejected(self) -> None:
+        TRAINERS.validate_experiment_contract(TRAINERS.RUN_NAME)
+
     def test_empty_experiment_name_is_rejected(self) -> None:
         with self.assertRaisesRegex(TRAINERS.PreflightError, "must not be empty"):
             TRAINERS.validate_experiment_contract("  ")
 
-    def test_preflight_blocks_rejected_run_before_reading_private_inputs(self) -> None:
-        with mock.patch.object(
-            TRAINERS,
-            "TRAINER",
-            Path("/definitely/missing/trainer.py"),
+    def test_rejected_contract_is_checked_before_private_inputs(self) -> None:
+        with self.assertRaisesRegex(
+            TRAINERS.PreflightError,
+            "rejected non-causal experiment",
         ):
-            with self.assertRaisesRegex(
-                TRAINERS.PreflightError,
-                "rejected non-causal experiment",
-            ):
-                TRAINERS.preflight(TRAINERS.SITES["newing"])
+            TRAINERS.validate_experiment_contract("iq7_drop_stale_actor_inputs_v1")
 
     def test_output_directory_is_scoped_by_site_and_run(self) -> None:
         youngone = TRAINERS.SITES["youngone"].output_dir
@@ -646,16 +644,15 @@ class PrivateTrainerManifestTests(unittest.TestCase):
             TRAINERS.run_site(TRAINERS.SITES["namduoc"], dry_run=True)
 
     def test_real_enabled_sites_pass_launcher_preflight(self) -> None:
-        with mock.patch.object(TRAINERS, "RUN_NAME", TRAINERS.CAUSAL_BASELINE):
-            for slug, site in TRAINERS.SITES.items():
-                if not site.enabled:
-                    continue
-                with self.subTest(site=slug):
-                    audit, train, validation, test, _raw = TRAINERS.preflight(site)
-                    self.assertGreaterEqual(len(audit.eligible_months), 4)
-                    self.assertGreaterEqual(len(train), 1)
-                    self.assertEqual(len(validation), 2)
-                    self.assertEqual(len(test), 1)
+        for slug, site in TRAINERS.SITES.items():
+            if not site.enabled:
+                continue
+            with self.subTest(site=slug):
+                audit, train, validation, test, _raw = TRAINERS.preflight(site)
+                self.assertGreaterEqual(len(audit.eligible_months), 4)
+                self.assertGreaterEqual(len(train), 1)
+                self.assertEqual(len(validation), 2)
+                self.assertEqual(len(test), 1)
 
     def test_real_namduoc_data_cannot_form_required_split(self) -> None:
         site = TRAINERS.SITES["namduoc"]

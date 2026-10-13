@@ -8,7 +8,7 @@ import pytest
 
 from rule_based import mama
 from rule_based.controller import RuleBasedController, robust_high_quantile
-from rule_based.models import RuleSettings
+from rule_based.models import Decision, RuleSettings
 
 PRIVATE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -58,6 +58,29 @@ def tou_tariffs() -> np.ndarray:
     return result
 
 
+def dispatch(
+    controller: RuleBasedController,
+    *,
+    slot: int,
+    load_kw: float,
+    pv_kw: float,
+    soc: float,
+) -> Decision:
+    """Use one completed sample as the causal estimate and current truth."""
+    intent = controller.decide(
+        slot=slot,
+        previous_load_kw=load_kw,
+        previous_pv_kw=pv_kw,
+        soc=soc,
+    )
+    return controller.project(
+        intent,
+        current_load_kw=load_kw,
+        current_pv_kw=pv_kw,
+        soc=soc,
+    )
+
+
 def run_complete_day(
     controller: RuleBasedController,
     *,
@@ -68,7 +91,8 @@ def run_complete_day(
 ) -> float:
     controller.start_day(flat_tariffs() if tariffs is None else tariffs)
     for slot in range(mama.STEPS_PER_DAY):
-        decision = controller.decide(
+        decision = dispatch(
+            controller,
             slot=slot,
             load_kw=load_kw,
             pv_kw=pv_kw,
@@ -118,9 +142,9 @@ class TestSettingsAndHistory:
         controller = RuleBasedController(make_config())
         controller.start_day(flat_tariffs())
         for slot in range(95):
-            controller.decide(slot=slot, load_kw=80.0, pv_kw=0.0, soc=0.9)
+            dispatch(controller, slot=slot, load_kw=80.0, pv_kw=0.0, soc=0.9)
         assert controller.peak_history == ()
-        controller.decide(slot=95, load_kw=80.0, pv_kw=0.0, soc=0.9)
+        dispatch(controller, slot=95, load_kw=80.0, pv_kw=0.0, soc=0.9)
         assert controller.peak_history == (80.0,)
 
     def test_history_is_bounded_to_previous_30_days(self) -> None:
@@ -150,7 +174,9 @@ class TestPhysicsAndPv:
         )
         controller = RuleBasedController(make_config(), settings)
         controller.start_day(flat_tariffs())
-        decision = controller.decide(slot=0, load_kw=10.0, pv_kw=30.0, soc=0.5)
+        decision = dispatch(
+            controller, slot=0, load_kw=10.0, pv_kw=30.0, soc=0.5
+        )
         assert decision.reason == "pv_self_consumption"
         assert decision.charge_pv_kw == pytest.approx(20.0)
         assert decision.grid_power_kw == pytest.approx(0.0)
@@ -159,7 +185,9 @@ class TestPhysicsAndPv:
     def test_full_battery_curtailed_pv_never_exports(self) -> None:
         controller = RuleBasedController(make_config())
         controller.start_day(flat_tariffs())
-        decision = controller.decide(slot=0, load_kw=0.0, pv_kw=40.0, soc=0.9)
+        decision = dispatch(
+            controller, slot=0, load_kw=0.0, pv_kw=40.0, soc=0.9
+        )
         assert decision.battery_power_kw == pytest.approx(0.0)
         assert decision.grid_power_kw == pytest.approx(0.0)
         assert decision.curtailed_pv_kw == pytest.approx(40.0)
@@ -167,7 +195,9 @@ class TestPhysicsAndPv:
     def test_pv_charge_is_capped_by_rated_power(self) -> None:
         controller = RuleBasedController(make_config(power_kw=25.0))
         controller.start_day(flat_tariffs())
-        decision = controller.decide(slot=0, load_kw=0.0, pv_kw=100.0, soc=0.2)
+        decision = dispatch(
+            controller, slot=0, load_kw=0.0, pv_kw=100.0, soc=0.2
+        )
         assert decision.charge_pv_kw == pytest.approx(25.0)
         assert decision.curtailed_pv_kw == pytest.approx(75.0)
 
@@ -175,7 +205,9 @@ class TestPhysicsAndPv:
         cfg = make_config(energy_kwh=100.0, power_kw=100.0)
         controller = RuleBasedController(cfg)
         controller.start_day(flat_tariffs())
-        decision = controller.decide(slot=0, load_kw=0.0, pv_kw=100.0, soc=0.89)
+        decision = dispatch(
+            controller, slot=0, load_kw=0.0, pv_kw=100.0, soc=0.89
+        )
         expected = (0.9 - 0.89) * 100.0 / (0.9 * 0.25)
         assert decision.charge_pv_kw == pytest.approx(expected)
 
@@ -184,7 +216,9 @@ class TestPhysicsAndPv:
         controller = RuleBasedController(cfg)
         warm_target(controller, 100.0)
         controller.start_day(flat_tariffs())
-        decision = controller.decide(slot=0, load_kw=200.0, pv_kw=0.0, soc=cfg.soc_min)
+        decision = dispatch(
+            controller, slot=0, load_kw=200.0, pv_kw=0.0, soc=cfg.soc_min
+        )
         assert decision.discharge_kw == pytest.approx(0.0)
 
     def test_inputs_outside_physics_are_rejected(self) -> None:
@@ -192,7 +226,12 @@ class TestPhysicsAndPv:
         controller = RuleBasedController(cfg)
         controller.start_day(flat_tariffs())
         with pytest.raises(ValueError, match="soc"):
-            controller.decide(slot=0, load_kw=1.0, pv_kw=0.0, soc=0.0)
+            controller.decide(
+                slot=0,
+                previous_load_kw=1.0,
+                previous_pv_kw=0.0,
+                soc=0.0,
+            )
 
 
 class TestPeakPolice:
@@ -207,23 +246,28 @@ class TestPeakPolice:
 
     def test_first_slot_shaves_to_target(self) -> None:
         controller = self.make_warm_controller()
-        decision = controller.decide(slot=0, load_kw=120.0, pv_kw=0.0, soc=0.9)
+        decision = dispatch(
+            controller, slot=0, load_kw=120.0, pv_kw=0.0, soc=0.9
+        )
         assert decision.allowed_grid_kw == pytest.approx(90.0)
         assert decision.discharge_kw == pytest.approx(30.0)
         assert decision.grid_power_kw == pytest.approx(90.0)
 
     def test_second_slot_uses_remaining_block_budget(self) -> None:
         controller = self.make_warm_controller()
-        first = controller.decide(slot=0, load_kw=80.0, pv_kw=0.0, soc=0.9)
+        first = dispatch(controller, slot=0, load_kw=80.0, pv_kw=0.0, soc=0.9)
         soc = mama.apply_soc(controller.cfg, 0.9, first.battery_power_kw)
-        second = controller.decide(slot=1, load_kw=120.0, pv_kw=0.0, soc=soc)
+        second = dispatch(
+            controller, slot=1, load_kw=120.0, pv_kw=0.0, soc=soc
+        )
         assert second.allowed_grid_kw == pytest.approx(100.0)
         assert second.discharge_kw == pytest.approx(20.0)
         assert (first.grid_power_kw + second.grid_power_kw) / 2 == pytest.approx(90.0)
 
     def test_peak_police_can_use_soft_reserve(self) -> None:
         controller = self.make_warm_controller()
-        decision = controller.decide(
+        decision = dispatch(
+            controller,
             slot=0,
             load_kw=120.0,
             pv_kw=0.0,
@@ -235,17 +279,199 @@ class TestPeakPolice:
     def test_billed_monthly_peak_becomes_target_floor(self) -> None:
         controller = self.make_warm_controller()
         cfg = controller.cfg
-        first = controller.decide(slot=0, load_kw=200.0, pv_kw=0.0, soc=0.21)
+        first = dispatch(controller, slot=0, load_kw=200.0, pv_kw=0.0, soc=0.21)
         soc = mama.apply_soc(cfg, 0.21, first.battery_power_kw)
-        controller.decide(slot=1, load_kw=200.0, pv_kw=0.0, soc=soc)
+        dispatch(controller, slot=1, load_kw=200.0, pv_kw=0.0, soc=soc)
         assert controller.running_month_peak_kw > 90.0
-        third = controller.decide(slot=2, load_kw=150.0, pv_kw=0.0, soc=soc)
+        third = dispatch(controller, slot=2, load_kw=150.0, pv_kw=0.0, soc=soc)
         assert third.peak_target_kw == pytest.approx(controller.running_month_peak_kw)
 
     def test_out_of_order_slot_is_rejected(self) -> None:
         controller = self.make_warm_controller()
         with pytest.raises(ValueError, match="expected slot"):
-            controller.decide(slot=1, load_kw=0.0, pv_kw=0.0, soc=0.9)
+            controller.decide(
+                slot=1,
+                previous_load_kw=0.0,
+                previous_pv_kw=0.0,
+                soc=0.9,
+            )
+
+
+class TestCausalDecisionBoundary:
+    @staticmethod
+    def _ready_controller() -> RuleBasedController:
+        controller = RuleBasedController(
+            make_config(), RuleSettings(sustainable_peak_hours=6.3)
+        )
+        warm_target(controller, 100.0)
+        controller.start_month()
+        controller.start_day(flat_tariffs())
+        return controller
+
+    def test_first_slot_intent_cannot_see_current_load_or_pv(self) -> None:
+        ordinary = self._ready_controller()
+        spike = self._ready_controller()
+
+        ordinary_intent = ordinary.decide(
+            slot=0,
+            previous_load_kw=80.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+        spike_intent = spike.decide(
+            slot=0,
+            previous_load_kw=80.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+
+        assert ordinary_intent == spike_intent
+        ordinary_decision = ordinary.project(
+            ordinary_intent,
+            current_load_kw=80.0,
+            current_pv_kw=0.0,
+            soc=0.9,
+        )
+        spike_decision = spike.project(
+            spike_intent,
+            current_load_kw=200.0,
+            current_pv_kw=0.0,
+            soc=0.9,
+        )
+        assert ordinary_decision.battery_power_kw == spike_decision.battery_power_kw
+        assert ordinary_decision.grid_power_kw != spike_decision.grid_power_kw
+
+    def test_same_slot_truth_only_changes_physical_projection(self) -> None:
+        high_load = self._ready_controller()
+        low_load = self._ready_controller()
+        first_high = dispatch(
+            high_load, slot=0, load_kw=120.0, pv_kw=0.0, soc=0.9
+        )
+        first_low = dispatch(
+            low_load, slot=0, load_kw=120.0, pv_kw=0.0, soc=0.9
+        )
+        soc = mama.apply_soc(high_load.cfg, 0.9, first_high.battery_power_kw)
+        assert first_high == first_low
+
+        high_intent = high_load.decide(
+            slot=1,
+            previous_load_kw=120.0,
+            previous_pv_kw=0.0,
+            soc=soc,
+        )
+        low_intent = low_load.decide(
+            slot=1,
+            previous_load_kw=120.0,
+            previous_pv_kw=0.0,
+            soc=soc,
+        )
+        assert high_intent == low_intent
+
+        high_decision = high_load.project(
+            high_intent,
+            current_load_kw=200.0,
+            current_pv_kw=0.0,
+            soc=soc,
+        )
+        low_decision = low_load.project(
+            low_intent,
+            current_load_kw=5.0,
+            current_pv_kw=0.0,
+            soc=soc,
+        )
+        assert high_decision.discharge_kw > low_decision.discharge_kw
+        assert low_decision.discharge_kw == pytest.approx(5.0)
+
+    def test_decide_requires_projection_before_next_slot(self) -> None:
+        controller = self._ready_controller()
+        controller.decide(
+            slot=0,
+            previous_load_kw=100.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+        with pytest.raises(RuntimeError, match="project"):
+            controller.decide(
+                slot=0,
+                previous_load_kw=100.0,
+                previous_pv_kw=0.0,
+                soc=0.9,
+            )
+
+    def test_project_rejects_a_rewritten_pending_intent(self) -> None:
+        controller = self._ready_controller()
+        intent = controller.decide(
+            slot=0,
+            previous_load_kw=100.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+        rewritten = replace(intent, requested_battery_power_kw=50.0)
+        with pytest.raises(RuntimeError, match="pending decision"):
+            controller.project(
+                rewritten,
+                current_load_kw=100.0,
+                current_pv_kw=0.0,
+                soc=0.9,
+            )
+
+    def test_day_boundary_intent_uses_prior_days_last_completed_slot(self) -> None:
+        no_load = RuleBasedController(make_config())
+        pv_surge = RuleBasedController(make_config())
+        for controller in (no_load, pv_surge):
+            run_complete_day(controller, load_kw=120.0, soc=0.9)
+            controller.start_day(flat_tariffs())
+
+        no_load_intent = no_load.decide(
+            slot=0,
+            previous_load_kw=120.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+        pv_surge_intent = pv_surge.decide(
+            slot=0,
+            previous_load_kw=120.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+        assert no_load_intent == pv_surge_intent
+
+        no_load_decision = no_load.project(
+            no_load_intent,
+            current_load_kw=120.0,
+            current_pv_kw=0.0,
+            soc=0.9,
+        )
+        pv_surge_decision = pv_surge.project(
+            pv_surge_intent,
+            current_load_kw=0.0,
+            current_pv_kw=200.0,
+            soc=0.9,
+        )
+        assert no_load_decision.discharge_kw > 0.0
+        assert pv_surge_decision.discharge_kw == pytest.approx(0.0)
+
+    def test_month_boundary_first_intent_uses_explicit_reset_sample(self) -> None:
+        ordinary = RuleBasedController(make_config())
+        spike = RuleBasedController(make_config())
+        for controller in (ordinary, spike):
+            run_complete_day(controller, load_kw=120.0, soc=0.9)
+            controller.start_month()
+            controller.start_day(flat_tariffs())
+
+        ordinary_intent = ordinary.decide(
+            slot=0,
+            previous_load_kw=0.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+        spike_intent = spike.decide(
+            slot=0,
+            previous_load_kw=0.0,
+            previous_pv_kw=0.0,
+            soc=0.9,
+        )
+        assert ordinary_intent == spike_intent
 
 
 class TestChargingAndArbitrage:
@@ -253,7 +479,7 @@ class TestChargingAndArbitrage:
         cfg = make_config()
         controller = RuleBasedController(cfg)
         controller.start_day(tou_tariffs())
-        decision = controller.decide(slot=0, load_kw=0.0, pv_kw=0.0, soc=0.3)
+        decision = dispatch(controller, slot=0, load_kw=0.0, pv_kw=0.0, soc=0.3)
         expected = (0.9 - 0.3) * 100.0 / (0.9 * 6.0)
         assert decision.charge_grid_kw == pytest.approx(expected)
 
@@ -263,7 +489,9 @@ class TestChargingAndArbitrage:
         controller.start_day(tou_tariffs())
         soc = 0.2
         for slot in range(24):
-            decision = controller.decide(slot=slot, load_kw=0.0, pv_kw=0.0, soc=soc)
+            decision = dispatch(
+                controller, slot=slot, load_kw=0.0, pv_kw=0.0, soc=soc
+            )
             if slot < 23:
                 # Simulate an unavailable charger despite prior requests.
                 continue
@@ -277,7 +505,7 @@ class TestChargingAndArbitrage:
         warm_target(controller, 100.0)
         controller.start_month()
         controller.start_day(tou_tariffs())
-        decision = controller.decide(slot=0, load_kw=85.0, pv_kw=0.0, soc=0.3)
+        decision = dispatch(controller, slot=0, load_kw=85.0, pv_kw=0.0, soc=0.3)
         assert decision.allowed_grid_kw == pytest.approx(90.0)
         assert decision.charge_grid_kw == pytest.approx(5.0)
         assert decision.grid_power_kw == pytest.approx(90.0)
@@ -289,7 +517,9 @@ class TestChargingAndArbitrage:
         controller.start_day(tariffs)
         soc = 0.3
         for slot in range(25):
-            decision = controller.decide(slot=slot, load_kw=0.0, pv_kw=0.0, soc=soc)
+            decision = dispatch(
+                controller, slot=slot, load_kw=0.0, pv_kw=0.0, soc=soc
+            )
             if slot < 24:
                 soc = 0.3  # emulate unavailable overnight charging
         assert decision.charge_grid_kw == pytest.approx(0.0)
@@ -301,7 +531,8 @@ class TestChargingAndArbitrage:
         controller.start_day(tariffs)
         soc = controller.reserve_soc
         for slot in range(71):
-            decision = controller.decide(
+            decision = dispatch(
+                controller,
                 slot=slot,
                 load_kw=100.0,
                 pv_kw=0.0,
@@ -316,7 +547,8 @@ class TestChargingAndArbitrage:
         controller.start_day(tou_tariffs())
         soc = 0.9
         for slot in range(71):
-            decision = controller.decide(
+            decision = dispatch(
+                controller,
                 slot=slot,
                 load_kw=100.0,
                 pv_kw=0.0,
@@ -332,7 +564,8 @@ class TestChargingAndArbitrage:
         controller = RuleBasedController(cfg)
         controller.start_day(tou_tariffs())
         for slot in range(71):
-            decision = controller.decide(
+            decision = dispatch(
+                controller,
                 slot=slot,
                 load_kw=100.0,
                 pv_kw=0.0,
@@ -346,7 +579,8 @@ class TestChargingAndArbitrage:
         controller.start_day(tou_tariffs())
         soc = 0.9
         for slot in range(25):
-            decision = controller.decide(
+            decision = dispatch(
+                controller,
                 slot=slot,
                 load_kw=100.0,
                 pv_kw=0.0,

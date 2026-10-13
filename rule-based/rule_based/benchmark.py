@@ -117,6 +117,8 @@ def run_benchmark(
     for month_days in group_days_by_month(days):
         controller.start_month()
         soc = cfg.soc_eod
+        previous_load_kw = 0.0
+        previous_pv_kw = 0.0
         grid_days: list[np.ndarray] = []
         bess_days: list[np.ndarray] = []
         soc_days: list[np.ndarray] = []
@@ -137,13 +139,23 @@ def run_benchmark(
             ) * mama.DT_HOURS
 
             for slot in range(mama.STEPS_PER_DAY):
-                decision = controller.decide(
+                intent = controller.decide(
                     slot=slot,
-                    load_kw=float(day.load[slot]),
-                    pv_kw=float(day.pv_potential[slot]),
+                    previous_load_kw=previous_load_kw,
+                    previous_pv_kw=previous_pv_kw,
+                    soc=soc,
+                )
+                current_load_kw = float(day.load[slot])
+                current_pv_kw = float(day.pv_potential[slot])
+                decision = controller.project(
+                    intent,
+                    current_load_kw=current_load_kw,
+                    current_pv_kw=current_pv_kw,
                     soc=soc,
                 )
                 soc = mama.apply_soc(cfg, soc, decision.battery_power_kw)
+                previous_load_kw = current_load_kw
+                previous_pv_kw = current_pv_kw
                 grid[slot] = decision.grid_power_kw
                 battery[slot] = decision.battery_power_kw
                 soc_path[slot + 1] = soc

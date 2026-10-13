@@ -1,7 +1,8 @@
 """Causal, deterministic battery dispatch rules.
 
-The controller knows current load/PV/SOC, completed history, and the published
-tariff calendar.  It never reads future load/PV and has no learned component.
+The economic intent for slot ``t`` knows completed load/PV through ``t-1``, SOC,
+completed history, and the published tariff calendar. Slot ``t`` truth enters
+only the subsequent physical projection. The controller has no learned component.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from rule_based import mama
-from rule_based.models import Decision, RuleSettings
+from rule_based.models import Decision, RuleIntent, RuleSettings
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class RuleBasedController:
         self._block_grid_sum_kw = 0.0
         self._running_month_peak_kw = 0.0
         self._expected_slot = 0
+        self._pending_intent: RuleIntent | None = None
         self._day_started = False
         self._target: PeakTarget | None = None
 
@@ -110,6 +112,7 @@ class RuleBasedController:
         self._daily_nobess_grid = []
         self._block_grid_sum_kw = 0.0
         self._expected_slot = 0
+        self._pending_intent = None
         self._day_started = True
         self._target = self._build_peak_target()
         return self._target
@@ -239,147 +242,173 @@ class RuleBasedController:
         self,
         *,
         slot: int,
-        load_kw: float,
-        pv_kw: float,
+        previous_load_kw: float,
+        previous_pv_kw: float,
         soc: float,
-    ) -> Decision:
-        """Choose and record one action using only causally available values."""
+    ) -> RuleIntent:
+        """Choose an economic intent from measurements completed before ``slot``."""
         if not self._day_started:
             raise RuntimeError("start_day must be called before decide")
+        if self._pending_intent is not None:
+            raise RuntimeError("project the pending intent before deciding again")
         if slot != self._expected_slot:
             raise ValueError(f"expected slot {self._expected_slot}, received {slot}")
-        if not math.isfinite(load_kw) or load_kw < 0.0:
-            raise ValueError("load_kw must be finite and non-negative")
-        if not math.isfinite(pv_kw) or pv_kw < 0.0:
-            raise ValueError("pv_kw must be finite and non-negative")
+        if not math.isfinite(previous_load_kw) or previous_load_kw < 0.0:
+            raise ValueError("previous_load_kw must be finite and non-negative")
+        if not math.isfinite(previous_pv_kw) or previous_pv_kw < 0.0:
+            raise ValueError("previous_pv_kw must be finite and non-negative")
+        if not math.isfinite(soc) or not self.cfg.soc_min <= soc <= self.cfg.soc_max:
+            raise ValueError("soc must be finite and inside configured limits")
+
+        # The intent may use SOC because it is known at the boundary. Passing a
+        # deliberately large causal load obtains the rated/SOC discharge bound
+        # without pretending the completed average for slot t is already known.
+        bounds = mama.physical_bounds(
+            self.cfg,
+            soc=soc,
+            load_kw=self.cfg.p_rated_kw,
+            pv_kw=0.0,
+        )
+        previous_net_load_kw = max(0.0, previous_load_kw - previous_pv_kw)
+        previous_pv_surplus_kw = max(0.0, previous_pv_kw - previous_load_kw)
+        allowed_grid_kw = self._allowed_grid_kw(slot)
+        peak_discharge_kw = 0.0
+        if allowed_grid_kw is not None:
+            peak_discharge_kw = max(
+                0.0,
+                previous_net_load_kw - allowed_grid_kw,
+            )
+
+        requested_power_kw = 0.0
+        reason = "no_op"
+        deadline_impossible = False
+        if peak_discharge_kw > self.settings.numeric_tolerance:
+            requested_power_kw = min(peak_discharge_kw, bounds.max_discharge_kw)
+            reason = "peak_police"
+        elif previous_pv_surplus_kw > self.settings.numeric_tolerance:
+            scheduled_kw, deadline_impossible = self._scheduled_grid_charge_kw(
+                slot, soc
+            )
+            pv_charge_kw = min(previous_pv_surplus_kw, bounds.max_charge_kw)
+            remaining_power_kw = max(0.0, bounds.max_charge_kw - pv_charge_kw)
+            grid_charge_kw = self._causal_grid_charge_kw(
+                scheduled_grid_kw=scheduled_kw,
+                previous_net_load_kw=previous_net_load_kw,
+                remaining_power_kw=remaining_power_kw,
+                allowed_grid_kw=allowed_grid_kw,
+            )
+            requested_power_kw = -(pv_charge_kw + grid_charge_kw)
+            reason = "pv_self_consumption"
+        else:
+            economic_kw = self._economic_discharge_kw(slot, soc)
+            if economic_kw > self.settings.numeric_tolerance:
+                requested_power_kw = min(economic_kw, bounds.max_discharge_kw)
+                reason = "economic_discharge"
+            else:
+                scheduled_kw, deadline_impossible = self._scheduled_grid_charge_kw(
+                    slot, soc
+                )
+                grid_charge_kw = self._causal_grid_charge_kw(
+                    scheduled_grid_kw=scheduled_kw,
+                    previous_net_load_kw=previous_net_load_kw,
+                    remaining_power_kw=bounds.max_charge_kw,
+                    allowed_grid_kw=allowed_grid_kw,
+                )
+                requested_power_kw = -grid_charge_kw
+                reason = "scheduled_charge" if grid_charge_kw > 0.0 else "no_op"
+
+        intent = RuleIntent(
+            slot=slot,
+            requested_battery_power_kw=requested_power_kw,
+            peak_target_kw=self._effective_peak_target_kw(),
+            allowed_grid_kw=allowed_grid_kw,
+            reason=reason,
+            deadline_impossible=deadline_impossible,
+        )
+        self._pending_intent = intent
+        return intent
+
+    @staticmethod
+    def _causal_grid_charge_kw(
+        *,
+        scheduled_grid_kw: float,
+        previous_net_load_kw: float,
+        remaining_power_kw: float,
+        allowed_grid_kw: float | None,
+    ) -> float:
+        if allowed_grid_kw is None:
+            peak_safe_grid_charge_kw = remaining_power_kw
+        else:
+            peak_safe_grid_charge_kw = max(
+                0.0,
+                allowed_grid_kw - previous_net_load_kw,
+            )
+        return min(
+            scheduled_grid_kw,
+            remaining_power_kw,
+            peak_safe_grid_charge_kw,
+        )
+
+    def project(
+        self,
+        intent: RuleIntent,
+        *,
+        current_load_kw: float,
+        current_pv_kw: float,
+        soc: float,
+    ) -> Decision:
+        """Apply only physical limits using truth observed inside ``intent.slot``."""
+        if self._pending_intent != intent:
+            raise RuntimeError("intent is not the controller's pending decision")
+        if not math.isfinite(current_load_kw) or current_load_kw < 0.0:
+            raise ValueError("current_load_kw must be finite and non-negative")
+        if not math.isfinite(current_pv_kw) or current_pv_kw < 0.0:
+            raise ValueError("current_pv_kw must be finite and non-negative")
         if not math.isfinite(soc) or not self.cfg.soc_min <= soc <= self.cfg.soc_max:
             raise ValueError("soc must be finite and inside configured limits")
 
         bounds = mama.physical_bounds(
             self.cfg,
             soc=soc,
-            load_kw=load_kw,
-            pv_kw=pv_kw,
+            load_kw=current_load_kw,
+            pv_kw=current_pv_kw,
         )
-        net_load_kw = max(0.0, load_kw - pv_kw)
-        pv_surplus_kw = max(0.0, pv_kw - load_kw)
-        allowed_grid_kw = self._allowed_grid_kw(slot)
-        peak_discharge_kw = 0.0
-        if allowed_grid_kw is not None:
-            peak_discharge_kw = max(0.0, net_load_kw - allowed_grid_kw)
-
-        pv_charge_kw = min(pv_surplus_kw, bounds.max_charge_kw)
-        deadline_impossible = False
-        if peak_discharge_kw > self.settings.numeric_tolerance:
-            discharge_kw = min(peak_discharge_kw, bounds.max_discharge_kw)
-            decision = self._discharge_decision(
-                discharge_kw,
-                net_load_kw,
-                allowed_grid_kw,
-                "peak_police",
-            )
-        elif pv_surplus_kw > self.settings.numeric_tolerance:
-            scheduled_kw, deadline_impossible = self._scheduled_grid_charge_kw(
-                slot, soc
-            )
-            decision = self._charge_decision(
-                scheduled_grid_kw=scheduled_kw,
-                pv_charge_kw=pv_charge_kw,
-                pv_surplus_kw=pv_surplus_kw,
-                net_load_kw=net_load_kw,
-                max_charge_kw=bounds.max_charge_kw,
-                allowed_grid_kw=allowed_grid_kw,
-                reason="pv_self_consumption",
-                deadline_impossible=deadline_impossible,
-            )
+        requested_power_kw = intent.requested_battery_power_kw
+        current_net_load_kw = max(0.0, current_load_kw - current_pv_kw)
+        current_pv_surplus_kw = max(0.0, current_pv_kw - current_load_kw)
+        if requested_power_kw >= 0.0:
+            discharge_kw = min(requested_power_kw, bounds.max_discharge_kw)
+            charge_pv_kw = 0.0
+            charge_grid_kw = 0.0
+            battery_power_kw = discharge_kw
         else:
-            economic_kw = self._economic_discharge_kw(slot, soc)
-            if economic_kw > self.settings.numeric_tolerance:
-                discharge_kw = min(economic_kw, bounds.max_discharge_kw)
-                decision = self._discharge_decision(
-                    discharge_kw,
-                    net_load_kw,
-                    allowed_grid_kw,
-                    "economic_discharge",
-                )
-            else:
-                scheduled_kw, deadline_impossible = self._scheduled_grid_charge_kw(
-                    slot, soc
-                )
-                reason = "scheduled_charge" if scheduled_kw > 0.0 else "no_op"
-                decision = self._charge_decision(
-                    scheduled_grid_kw=scheduled_kw,
-                    pv_charge_kw=0.0,
-                    pv_surplus_kw=0.0,
-                    net_load_kw=net_load_kw,
-                    max_charge_kw=bounds.max_charge_kw,
-                    allowed_grid_kw=allowed_grid_kw,
-                    reason=reason,
-                    deadline_impossible=deadline_impossible,
-                )
+            total_charge_kw = min(-requested_power_kw, bounds.max_charge_kw)
+            charge_pv_kw = min(total_charge_kw, current_pv_surplus_kw)
+            charge_grid_kw = total_charge_kw - charge_pv_kw
+            discharge_kw = 0.0
+            battery_power_kw = -total_charge_kw
 
-        self._record_slot(slot, decision.grid_power_kw, net_load_kw)
-        return decision
-
-    def _discharge_decision(
-        self,
-        discharge_kw: float,
-        net_load_kw: float,
-        allowed_grid_kw: float | None,
-        reason: str,
-    ) -> Decision:
-        grid_kw = max(0.0, net_load_kw - discharge_kw)
-        return Decision(
-            battery_power_kw=discharge_kw,
-            grid_power_kw=grid_kw,
-            charge_pv_kw=0.0,
-            charge_grid_kw=0.0,
-            discharge_kw=discharge_kw,
-            curtailed_pv_kw=0.0,
-            peak_target_kw=self._effective_peak_target_kw(),
-            allowed_grid_kw=allowed_grid_kw,
-            reason=reason,
-        )
-
-    def _charge_decision(
-        self,
-        *,
-        scheduled_grid_kw: float,
-        pv_charge_kw: float,
-        pv_surplus_kw: float,
-        net_load_kw: float,
-        max_charge_kw: float,
-        allowed_grid_kw: float | None,
-        reason: str,
-        deadline_impossible: bool,
-    ) -> Decision:
-        remaining_power_kw = max(0.0, max_charge_kw - pv_charge_kw)
-        if allowed_grid_kw is None:
-            peak_safe_grid_charge_kw = remaining_power_kw
-        else:
-            peak_safe_grid_charge_kw = max(0.0, allowed_grid_kw - net_load_kw)
-        grid_charge_kw = min(
-            scheduled_grid_kw,
-            remaining_power_kw,
-            peak_safe_grid_charge_kw,
-        )
-        total_charge_kw = pv_charge_kw + grid_charge_kw
-        grid_kw = net_load_kw + grid_charge_kw
+        grid_kw = current_net_load_kw + charge_grid_kw - discharge_kw
         final_reason = (
-            reason if total_charge_kw > self.settings.numeric_tolerance else "no_op"
+            intent.reason
+            if abs(battery_power_kw) > self.settings.numeric_tolerance
+            else "no_op"
         )
-        return Decision(
-            battery_power_kw=-total_charge_kw,
+        decision = Decision(
+            battery_power_kw=battery_power_kw,
             grid_power_kw=grid_kw,
-            charge_pv_kw=pv_charge_kw,
-            charge_grid_kw=grid_charge_kw,
-            discharge_kw=0.0,
-            curtailed_pv_kw=max(0.0, pv_surplus_kw - pv_charge_kw),
-            peak_target_kw=self._effective_peak_target_kw(),
-            allowed_grid_kw=allowed_grid_kw,
+            charge_pv_kw=charge_pv_kw,
+            charge_grid_kw=charge_grid_kw,
+            discharge_kw=discharge_kw,
+            curtailed_pv_kw=max(0.0, current_pv_surplus_kw - charge_pv_kw),
+            peak_target_kw=intent.peak_target_kw,
+            allowed_grid_kw=intent.allowed_grid_kw,
             reason=final_reason,
-            deadline_impossible=deadline_impossible,
+            deadline_impossible=intent.deadline_impossible,
         )
+        self._record_slot(intent.slot, grid_kw, current_net_load_kw)
+        self._pending_intent = None
+        return decision
 
     def _record_slot(self, slot: int, grid_kw: float, nobess_grid_kw: float) -> None:
         self._block_grid_sum_kw += grid_kw

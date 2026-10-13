@@ -5,6 +5,13 @@ It imports battery configuration, tariffs, physical bounds, fixed 30-minute bill
 math, and scoring from the parent repository ("mama"). It imports no PPO policy,
 observation builder, reward, checkpoint, or future load/PV information.
 
+Every slot has a hard two-stage timing boundary. The economic `RuleIntent` for slot
+`t` uses only the completed load/PV sample from `t-1`, SOC at the boundary, completed
+demand-block state, completed-day peak history, and the published tariff calendar.
+Only after that intent is fixed may slot `t` load/PV enter the physical projector for
+SOC, rated-power, and zero-export enforcement. A completed slot-`t` average must never
+choose the slot-`t` economic intent.
+
 Priority order:
 
 1. physical SOC/power/efficiency/zero-export limits;

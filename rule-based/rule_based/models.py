@@ -39,8 +39,20 @@ class RuleSettings:
 
 
 @dataclass(frozen=True)
+class RuleIntent:
+    """Economic request chosen before the controlled slot is observed."""
+
+    slot: int
+    requested_battery_power_kw: float
+    peak_target_kw: float | None
+    allowed_grid_kw: float | None
+    reason: str
+    deadline_impossible: bool = False
+
+
+@dataclass(frozen=True)
 class Decision:
-    """One executable action. Positive battery power means discharge."""
+    """One physically projected action. Positive battery power means discharge."""
 
     battery_power_kw: float
     grid_power_kw: float
@@ -53,3 +65,7 @@ class Decision:
     reason: str
     deadline_impossible: bool = False
 
+
+# TODO(RULE-RUNTIME-BOUNDARY): keep RuleIntent separate from Decision when this
+# benchmark policy is wired into a live controller; collapsing them would make
+# it easy to reintroduce same-slot economic look-ahead.
